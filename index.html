@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Callcenter · Musicala</title>
+
+  <!-- Fuente y estilos -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+
+  <!-- Evita caches agresivos mientras iteramos -->
+  <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
+  <meta name="theme-color" content="#0C41C4" />
+  <meta name="description" content="Visor de base de datos conectado a Google Sheets vía Apps Script.">
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div class="brand">
+      <img src="logo.png" alt="Musicala" class="logo" />
+      <div>
+        <h1>Callcenter · Musicala</h1>
+        <p class="subtitle">Visor de base de datos — conectado a Google Sheets</p>
+      </div>
+    </div>
+
+    <div class="controls">
+      <label>
+        Hoja
+        <select id="sheetSelect" aria-label="Seleccionar hoja"></select>
+      </label>
+
+      <input id="search" type="search" placeholder="Buscar en la tabla…" aria-label="Buscar" />
+
+      <!-- NUEVO: botón para crear registro -->
+      <button id="btnNew" class="btn" type="button" title="Crear nuevo cliente">+ Nuevo</button>
+    </div>
+  </header>
+
+  <main class="container">
+    <div id="status" class="status">
+      <span class="spinner" aria-hidden="true">⏳</span> Cargando…
+    </div>
+
+    <div class="table-wrap" role="region" aria-live="polite">
+      <table id="dataTable" class="data-table" aria-describedby="status"></table>
+    </div>
+
+    <!-- Paginación -->
+    <div class="pager">
+      <button id="btnPrev" class="btn" disabled>« Anterior</button>
+      <span id="pageInfo" class="page-info">Página 1</span>
+      <button id="btnNext" class="btn">Siguiente »</button>
+
+      <label class="page-size">
+        Ver
+        <select id="pageSize" aria-label="Tamaño de página">
+          <option value="100">100</option>
+          <option value="200" selected>200</option>
+          <option value="500">500</option>
+          <option value="1000">1000</option>
+        </select>
+        por página
+      </label>
+    </div>
+  </main>
+
+  <footer class="app-footer">
+    <small>Hecho con ♥ por Musicala · v1</small>
+  </footer>
+
+  <!-- Modal de detalle/edición/creación -->
+  <div id="clientModal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" data-close="1"></div>
+
+    <div class="modal-dialog" role="dialog" aria-modal="true" aria-labelledby="clientTitle">
+      <button class="modal-close" type="button" aria-label="Cerrar" data-close="1">×</button>
+
+      <header class="modal-header">
+        <h2 id="clientTitle">Cliente</h2>
+        <p id="clientSubtitle" class="modal-subtitle"></p>
+      </header>
+
+      <section id="clientBody" class="modal-body">
+        <!-- Campos inyectados desde app.js -->
+      </section>
+
+      <footer class="modal-footer">
+        <!-- Botones se inyectan desde app.js -->
+      </footer>
+    </div>
+  </div>
+
+  <!-- Endpoint ÚNICO (tu implementación /exec) -->
+  <script>
+    window.API_BASE = 'https://script.google.com/macros/s/AKfycby5htUmBsJsqOrxRNGoG_g1iibehTr5BgZXw87037zA3mAPVL77LZuJgjtqj2y5MoIt/exec';
+  </script>
+
+  <!-- App -->
+  <script src="app.js"></script>
+
+  <style>
+    /* spinner simple sin tocar tu styles.css */
+    .spinner { display:inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin { from { transform: rotate(0deg);} to { transform: rotate(360deg);} }
+  </style>
+</body>
+</html>
