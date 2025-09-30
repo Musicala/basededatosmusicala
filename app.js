@@ -55,13 +55,13 @@
       "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto",
       "Septiembre","Octubre","Noviembre","Diciembre","2023","2024","Bloqueados",
       "Sede","Activo","Sin agendar","Clase de  Prueba","FESICOL","Vacacionales",
-      "Virtual","A hogar","No interesad@","Otros horarios","Distancia","Inscripción"
+      "Virtual","A hogar","No interesad@","Otros horarios","Distancia","Inscripción","No disponible"
     ],
     Listado1: [
       "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto",
       "Septiembre","Octubre","Noviembre","Diciembre","2023","2024","Bloqueados",
       "Sede","Activo","Sin agendar","Clase de  Prueba","FESICOL","Vacacionales",
-      "Virtual","A hogar","No interesad@","Otros horarios","Distancia","Inscripción"
+      "Virtual","A hogar","No interesad@","Otros horarios","Distancia","Inscripción","No disponible"
     ],
 
     Asesor: ["Alek Caballero","Catalina Medina","Camila Rodríguez"],
