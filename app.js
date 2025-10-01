@@ -30,27 +30,22 @@
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
   const API_BASE = window.API_BASE;
 
-  // Detectaremos automáticamente la columna clave según headers disponibles
-  const KEY_CANDIDATES = ['ID', 'Listado1', 'Celular/Teléfono'];
+  // 🔒 Forzamos la clave a ser SOLO "ID"
+  const KEY_CANDIDATES = ['ID'];
 
   // ====== Catálogos (listas fijas) ======
   const OPTIONS = {
     Grupo: ["Musiadultos","Musibabies","Musicalitos","Musigrandes","Musikids","Musiteens"],
-
-    // lista para Arte I, II y III
     ARTE: ["Música","Baile","Artes plásticas","Teatro","Vacacionales","Todos"],
-
     Modalidad: [
       "Domicilio","Hogar y virtual","Sede","Sede,Virtual y Domicilio",
       "Sede y Hogar","Virtual","Hogar","Plataforma Online","Sede y Virtual"
     ],
-
     "Curso/Plan": [
       "Personalizado","Grupal","Hogar","Virtual","Vacacional",
       "AutoMusicala","MusiGym","Curso de Formación","Preuniversitario",
       "Grupal y personalizado","Musifamiliar"
     ],
-
     Listado: [
       "Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto",
       "Septiembre","Octubre","Noviembre","Diciembre","2023","2024","Bloqueados",
@@ -63,11 +58,8 @@
       "Sede","Activo","Sin agendar","Clase de  Prueba","FESICOL","Vacacionales",
       "Virtual","A hogar","No interesad@","Otros horarios","Distancia","Inscripción","No disponible"
     ],
-
     Asesor: ["Alek Caballero","Catalina Medina","Camila Rodríguez"],
-
     "Canal de comunicación": ["Llamada","WhatsApp","Keybe","Instagram","Facebook","Wix","TikTok"],
-
     Prioridad: ["Alta","Media","Baja"]
   };
 
@@ -192,10 +184,10 @@
     currentRows    = res.rows || [];
     total          = parseInt(res.total || 0, 10);
 
-    // Elegir columna clave efectiva según headers
+    // 👇 Forzar que la clave sea ID
     keyColumnInUse = pickKeyColumn(currentHeaders);
     if (!keyColumnInUse) {
-      status('⚠️ No encontré una columna clave (ID/Listado1/Celular/Teléfono). Podrás ver datos, pero no guardar.');
+      status('⚠️ Esta hoja no tiene columna "ID". Verás datos, pero no podrás guardar cambios.');
     } else {
       status(`Listo. Clave: “${keyColumnInUse}”. Mostrando ${currentRows.length.toLocaleString()} de ${total.toLocaleString()} registros.`);
     }
@@ -254,15 +246,14 @@
   function openNewModal() {
     creatingNew = true;
 
-    // armar objeto vacío con todos los headers conocidos
+    // objeto vacío con todos los headers conocidos
     const empty = {};
     currentHeaders.forEach(h => empty[h] = '');
 
-    // opcional: si existe columna ID, generamos uno temporal para no perder la clave
-    if (currentHeaders.includes('ID')) {
-      empty['ID'] = genId(); // puedes quitarlo si prefieres escribirlo manualmente
-    }
-    // si quieres default del mes actual en Listado/Listado1:
+    // ❌ Ya no generamos ID temporal; lo pondrá tu script/flujo en Sheets
+    // if (currentHeaders.includes('ID')) { empty['ID'] = genId(); }
+
+    // defaults opcionales
     const monthName = new Intl.DateTimeFormat('es-CO', { month: 'long' }).format(new Date());
     const capital = (s)=> s.charAt(0).toUpperCase() + s.slice(1);
     if (currentHeaders.includes('Listado1') && !empty['Listado1']) empty['Listado1'] = capital(monthName);
@@ -305,8 +296,13 @@
 
       let input;
 
+      // 🔒 ID bloqueado siempre
+      if (headerName === 'ID') {
+        input = `<input id="${id}" name="${escAttr(h)}" class="in control" type="text"
+                 value="${escAttr(String(raw))}" readonly data-lock="1" />`;
+
       // Selects fijos
-      if (OPTIONS[headerName]) {
+      } else if (OPTIONS[headerName]) {
         const opts = OPTIONS[headerName];
         input = selectHTML(id, h, opts, String(raw), !isNew);
 
@@ -360,6 +356,7 @@
       btnSave.disabled = true;
       btnEdit.addEventListener('click', () => {
         modalBody.querySelectorAll('.control').forEach((el) => {
+          if (el.dataset.lock === '1') return; // 👈 no tocar ID
           el.removeAttribute('readonly');
           el.removeAttribute('disabled');
         });
@@ -386,11 +383,7 @@
         });
 
         if (creatingNew) {
-          // Validaciones mínimas: clave si existe / nombre opcional
-          if (keyColumnInUse) {
-            const k = String(formValues[keyColumnInUse] || '').trim();
-            if (!k) throw new Error(`Falta valor en la columna clave: ${keyColumnInUse}`);
-          }
+          // ✅ Ya no exigimos ID aquí; tu flujo de ID lo puede añadir en la hoja
           const body = new URLSearchParams({
             mode: 'add',
             sheet: currentSheet,
@@ -409,8 +402,11 @@
           return;
         }
 
-        // Edición existente
+        // ----- EDICIÓN EXISTENTE -----
         const changes = diffObject(originalRow, formValues);
+        // Nunca enviar cambios sobre ID
+        delete changes['ID'];
+
         if (!Object.keys(changes).length) {
           saveStatus.textContent = 'Sin cambios';
           btnSave.disabled = false;
@@ -423,12 +419,13 @@
           btnSave.disabled = false;
           return;
         }
+
         const body = new URLSearchParams({
           mode: 'update',
           sheet: currentSheet,
           keyCol: keyColumnInUse,
           key,
-          upsert: 'true',
+          // ❌ No enviamos upsert para evitar que inserte si no encuentra
           row: JSON.stringify(changes)
         });
         const r = await fetch(API_BASE, { method:'POST', headers:{Accept:'application/json'}, body });
@@ -490,12 +487,12 @@
   }
 
   function pickKeyColumn(headers) {
-    for (const k of KEY_CANDIDATES) if (headers.includes(k)) return k;
-    return ''; // no hay clave conocida
+    // Solo aceptamos "ID" como clave
+    return headers.includes('ID') ? 'ID' : '';
   }
 
+  // (Dejado por si en algún momento se quiere otro generador)
   function genId(){
-    // ID corto y único (fecha + random base36)
     return 'ID-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6).toUpperCase();
   }
 
