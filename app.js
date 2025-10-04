@@ -605,3 +605,43 @@
     ].join('');
   }
 })();
+
+// ===== Deep link: ?q=Nombre  =====
+handleDeepLink();
+
+async function handleDeepLink() {
+  try {
+    const params = new URLSearchParams(location.search);
+    const q = (params.get('q') || '').trim();
+    if (!q) return;
+
+    // Ponemos el texto en el buscador y filtramos la tabla
+    searchBox.value = q;
+    filterTable();
+
+    // Normalización para comparar (quita tildes y pasa a minúsculas)
+    const norm = s => String(s || '')
+      .toLowerCase()
+      .normalize('NFD').replace(/\p{Diacritic}/gu,'')
+      .trim();
+
+    // Busca por “Nombre” (columna exacta) dentro de currentRows
+    const nameHeader = currentHeaders.find(h => /^nombre$/i.test(h)) || 'Nombre';
+    const qn = norm(q);
+
+    // 1) match exacto (normalizado)
+    let matchIdx = currentRows.findIndex(r => norm(r[nameHeader]) === qn);
+
+    // 2) si no hay exacto, match “includes”
+    if (matchIdx === -1) {
+      matchIdx = currentRows.findIndex(r => norm(r[nameHeader]).includes(qn));
+    }
+
+    // Si encontramos algo, abrimos el modal. Si no, solo queda la tabla filtrada.
+    if (matchIdx >= 0) {
+      openModal(currentRows[matchIdx]);
+    }
+  } catch (e) {
+    console.warn('Deep link q falló:', e);
+  }
+}
