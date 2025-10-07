@@ -20,7 +20,8 @@
 <body>
   <header class="app-header">
     <div class="brand">
-      <img src="logo.png" alt="Musicala" class="logo" />
+      <!-- IMPORTANTE: ruta explícita ./logo.png y fondo blanco para contraste -->
+      <img src="./logo.png" alt="Musicala" class="logo" width="44" height="44" />
       <div>
         <h1>Callcenter · Musicala</h1>
         <p class="subtitle">Visor de base de datos — conectado a Google Sheets</p>
@@ -33,9 +34,10 @@
         <select id="sheetSelect" aria-label="Seleccionar hoja"></select>
       </label>
 
-      <input id="search" type="search" placeholder="Buscar en la tabla…" aria-label="Buscar" />
+      <!-- ahora avisa que busca en TODA la hoja -->
+      <input id="search" type="search" placeholder="Buscar en toda la hoja…" aria-label="Buscar" />
 
-      <!-- NUEVO: botón para crear registro -->
+      <!-- botón crear registro -->
       <button id="btnNew" class="btn" type="button" title="Crear nuevo cliente">+ Nuevo</button>
     </div>
   </header>
@@ -50,7 +52,7 @@
     </div>
 
     <!-- Paginación -->
-    <div class="pager">
+    <div class="pager" id="pager">
       <button id="btnPrev" class="btn" disabled>« Anterior</button>
       <span id="pageInfo" class="page-info">Página 1</span>
       <button id="btnNext" class="btn">Siguiente »</button>
@@ -69,7 +71,7 @@
   </main>
 
   <footer class="app-footer">
-    <small>Hecho con ♥ por Musicala · v1</small>
+    <small>Hecho con ♥ por Musicala · v1.1</small>
   </footer>
 
   <!-- Modal de detalle/edición/creación -->
