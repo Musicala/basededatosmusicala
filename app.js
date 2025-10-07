@@ -1,7 +1,6 @@
 /* =============================
    app.js — Callcenter Musicala
-   Paginación + búsqueda + modal editable
-   Actualiza con POST (mode=update) y Crea con POST (mode=add)
+   Paginación + búsqueda global + modal editable
    ============================= */
 
 'use strict';
@@ -15,6 +14,7 @@
   const btnNew     = document.getElementById('btnNew');
 
   // Paginación
+  const pagerEl    = document.getElementById('pager');
   const btnPrev    = document.getElementById('btnPrev');
   const btnNext    = document.getElementById('btnNext');
   const pageInfo   = document.getElementById('pageInfo');
@@ -30,7 +30,7 @@
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
   const API_BASE = window.API_BASE;
 
-  // 🔒 Forzamos la clave a ser SOLO "ID"
+  // 🔒 Clave SOLO "ID"
   const KEY_CANDIDATES = ['ID'];
 
   // ====== Catálogos (listas fijas) ======
@@ -63,7 +63,7 @@
     Prioridad: ["Alta","Media","Baja"]
   };
 
-  // ====== Dependencias de Instrumento/Estilo/Técnica (según Arte) ======
+  // ====== Dependencias Arte/Instrumento ======
   const ART_TO_OPTIONS = {
     "Música": [
       "Piano","Guitarra","Canto","Violín","Batería","Cello","Bajo eléctrico","Ukelele",
@@ -82,7 +82,6 @@
     "Todos": ["Piano","Guitarra","Canto","Violín","Batería","Bailes Latinos","Dibujo","Pintura","Teatro","Vacacionales"]
   };
 
-  // Campos Arte / Instrumento por índice
   const ARTE_COLS = ["Arte I","Arte II","Arte III"];
   const INSTRUMENT_COLS = [
     "Instrumento/Estilo/Técnica I",
@@ -98,8 +97,13 @@
   let currentHeaders = [];
   let currentRows    = [];
   let originalRow    = null;
-  let keyColumnInUse = ''; // columna clave efectiva de la hoja cargada
-  let creatingNew    = false; // bandera "nuevo"
+  let keyColumnInUse = '';
+  let creatingNew    = false;
+
+  // ===== Búsqueda GLOBAL =====
+  const allRowsCache = new Map(); // sheet -> { headers, rows, total, ts }
+  let searchActive   = false;
+  let displayedRows  = [];        // filas actualmente renderizadas (página o filtradas)
 
   /* =============================
      1) Cargar hojas + primera página
@@ -125,28 +129,39 @@
   sheetSel.addEventListener('change', async (e) => {
     currentSheet = e.target.value;
     offset = 0;
+    searchBox.value = '';
+    searchActive = false;
+    pagerEl?.classList.remove('hidden');
     await loadPage();
   });
 
   btnPrev?.addEventListener('click', async () => {
+    if (searchActive) return; // no mover paginación durante búsqueda
     if (offset <= 0) return;
     offset = Math.max(0, offset - limit);
     await loadPage();
   });
 
   btnNext?.addEventListener('click', async () => {
+    if (searchActive) return;
     if (offset + limit >= total) return;
     offset = offset + limit;
     await loadPage();
   });
 
   pageSizeEl?.addEventListener('change', async () => {
+    if (searchActive) return;
     limit = parseInt(pageSizeEl.value, 10) || 200;
     offset = 0;
     await loadPage();
   });
 
-  searchBox.addEventListener('input', filterTable);
+  // Búsqueda GLOBAL con debounce
+  let debounce;
+  searchBox.addEventListener('input', () => {
+    clearTimeout(debounce);
+    debounce = setTimeout(applySearch, 250);
+  });
 
   // Nuevo cliente
   btnNew?.addEventListener('click', () => openNewModal());
@@ -156,7 +171,7 @@
     const btn = e.target.closest('.name-link');
     if (!btn) return;
     const idx = Number(btn.dataset.rowindex);
-    const row = currentRows[idx];
+    const row = displayedRows[idx]; // usa las filas visibles (página o búsqueda)
     if (row) openModal(row);
   });
 
@@ -169,7 +184,7 @@
   });
 
   /* =============================
-     3) Lógica de datos
+     3) Lógica de datos (paginado normal)
      ============================= */
   async function loadPage() {
     status(`Cargando “${currentSheet}”…`);
@@ -184,7 +199,6 @@
     currentRows    = res.rows || [];
     total          = parseInt(res.total || 0, 10);
 
-    // 👇 Forzar que la clave sea ID
     keyColumnInUse = pickKeyColumn(currentHeaders);
     if (!keyColumnInUse) {
       status('⚠️ Esta hoja no tiene columna "ID". Verás datos, pero no podrás guardar cambios.');
@@ -192,7 +206,8 @@
       status(`Listo. Clave: “${keyColumnInUse}”. Mostrando ${currentRows.length.toLocaleString()} de ${total.toLocaleString()} registros.`);
     }
 
-    renderTable(currentHeaders, currentRows);
+    displayedRows = currentRows;
+    renderTable(currentHeaders, displayedRows);
 
     const page  = Math.floor(offset / limit) + 1;
     const pages = Math.max(1, Math.ceil(total / limit));
@@ -201,8 +216,6 @@
     }
     if (btnPrev) btnPrev.disabled = offset <= 0;
     if (btnNext) btnNext.disabled = offset + limit >= total;
-
-    filterTable();
   }
 
   function renderTable(headers, rows) {
@@ -228,12 +241,76 @@
 
     table.innerHTML = thead + tbody;
 
+    // fuerza ancho mínimo por cantidad de columnas (para scroll horizontal)
     const pxPerCol = 140;
     table.style.minWidth = (headers.length * pxPerCol) + 'px';
   }
 
   /* =============================
-     4) Modales
+     4) Búsqueda GLOBAL
+     ============================= */
+  async function applySearch() {
+    const q = searchBox.value.trim().toLowerCase();
+
+    if (!q) {
+      // limpiar búsqueda -> volver a paginación normal
+      searchActive = false;
+      pagerEl?.classList.remove('hidden');
+      await loadPage();
+      return;
+    }
+
+    // activar búsqueda global
+    searchActive = true;
+    pagerEl?.classList.add('hidden');
+    status('Buscando en toda la hoja…');
+
+    // cachear si no está
+    let cache = allRowsCache.get(currentSheet);
+    if (!cache) {
+      cache = await loadAllRowsForSheet(currentSheet);
+      allRowsCache.set(currentSheet, cache);
+    }
+
+    // filtrar
+    const headers = cache.headers || [];
+    const rows    = cache.rows    || [];
+
+    const filtered = rows.filter((r) => {
+      // une todos los valores de la fila para una búsqueda simple
+      const text = headers.map(h => String(r[h] ?? '')).join(' ◦ ').toLowerCase();
+      return text.includes(q);
+    });
+
+    displayedRows = filtered;
+    renderTable(headers, filtered);
+
+    status(`Resultados: ${filtered.length.toLocaleString()} coincidencia(s) en “${currentSheet}”. (búsqueda global activa)`);
+  }
+
+  // Carga TODA la hoja usando paginación del API y la junta
+  async function loadAllRowsForSheet(sheetName) {
+    const headers = currentHeaders.length ? currentHeaders : (await fetchJSON(`${API_BASE}?mode=data&sheet=${encodeURIComponent(sheetName)}&limit=1&offset=0&_ts=${Date.now()}`)).headers;
+    const pageLimit = 1000; // tamaño grande para acelerar
+    let off = 0;
+    let tot = 0;
+    let all = [];
+
+    while (true) {
+      const url = `${API_BASE}?mode=data&sheet=${encodeURIComponent(sheetName)}&limit=${pageLimit}&offset=${off}&_ts=${Date.now()}`;
+      const res = await fetchJSON(url);
+      const rows = res.rows || [];
+      tot = parseInt(res.total || rows.length, 10);
+      all = all.concat(rows);
+      off += pageLimit;
+      if (all.length >= tot || rows.length === 0) break;
+    }
+
+    return { headers, rows: all, total: tot, ts: Date.now() };
+  }
+
+  /* =============================
+     5) Modales
      ============================= */
 
   // Abre modal para fila existente (editar)
@@ -246,14 +323,10 @@
   function openNewModal() {
     creatingNew = true;
 
-    // objeto vacío con todos los headers conocidos
     const empty = {};
     currentHeaders.forEach(h => empty[h] = '');
 
-    // ❌ Ya no generamos ID temporal; lo pondrá tu script/flujo en Sheets
-    // if (currentHeaders.includes('ID')) { empty['ID'] = genId(); }
-
-    // defaults opcionales
+    // Defaults de mes
     const monthName = new Intl.DateTimeFormat('es-CO', { month: 'long' }).format(new Date());
     const capital = (s)=> s.charAt(0).toUpperCase() + s.slice(1);
     if (currentHeaders.includes('Listado1') && !empty['Listado1']) empty['Listado1'] = capital(monthName);
@@ -383,7 +456,7 @@
         });
 
         if (creatingNew) {
-          // ✅ Ya no exigimos ID aquí; tu flujo de ID lo puede añadir en la hoja
+          // El ID lo genera tu flujo en Sheets si así lo decides
           const body = new URLSearchParams({
             mode: 'add',
             sheet: currentSheet,
@@ -404,8 +477,7 @@
 
         // ----- EDICIÓN EXISTENTE -----
         const changes = diffObject(originalRow, formValues);
-        // Nunca enviar cambios sobre ID
-        delete changes['ID'];
+        delete changes['ID']; // nunca tocar ID
 
         if (!Object.keys(changes).length) {
           saveStatus.textContent = 'Sin cambios';
@@ -425,7 +497,6 @@
           sheet: currentSheet,
           keyCol: keyColumnInUse,
           key,
-          // ❌ No enviamos upsert para evitar que inserte si no encuentra
           row: JSON.stringify(changes)
         });
         const r = await fetch(API_BASE, { method:'POST', headers:{Accept:'application/json'}, body });
@@ -477,25 +548,8 @@
   }
 
   /* =============================
-     5) Utilidades
+     6) Utilidades
      ============================= */
-  function filterTable() {
-    const q = searchBox.value.trim().toLowerCase();
-    table.querySelectorAll('tbody tr').forEach((tr) => {
-      tr.style.display = !q || tr.textContent.toLowerCase().includes(q) ? '' : 'none';
-    });
-  }
-
-  function pickKeyColumn(headers) {
-    // Solo aceptamos "ID" como clave
-    return headers.includes('ID') ? 'ID' : '';
-  }
-
-  // (Dejado por si en algún momento se quiere otro generador)
-  function genId(){
-    return 'ID-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2,6).toUpperCase();
-  }
-
   function status(msg) { statusEl.textContent = msg; }
 
   function showError(err) {
@@ -548,6 +602,10 @@
     const first = preferred.filter((h) => all.includes(h) && !seen.has(h) && seen.add(h));
     const rest  = all.filter((h) => !seen.has(h));
     return [...first, ...rest];
+  }
+
+  function pickKeyColumn(headers) {
+    return headers.includes('ID') ? 'ID' : '';
   }
 
   // --- Dates helpers ---
