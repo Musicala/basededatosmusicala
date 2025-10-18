@@ -72,7 +72,7 @@
     ],
     "Baile": [
       "Bailes Latinos","Danza clásica y contemporánea","Bailes Urbanos","Danzas folclóricas",
-      "Ballet","Salsa","Bongo"
+      "Ballet","Salsa","Exploración corporal"
     ],
     "Artes plásticas": [
       "Dibujo","Pintura","Óleo","Plastilina","Técnicas mixtas","Exploración Artística","Manualidades"
@@ -663,3 +663,4 @@
     ].join('');
   }
 })();
+
