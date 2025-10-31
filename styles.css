@@ -69,6 +69,40 @@ body {
 .container{ padding:1rem clamp(1rem, 2vw, 2rem); }
 .status{ margin:.5rem 0 1rem; color:var(--muted); font-size:.95rem; }
 
+/* 🔔 NUEVO: Avisos */
+.alerts{
+  display:flex; flex-direction:column; gap:.6rem;
+  margin:.5rem 0 1rem;
+}
+.alert-card{
+  display:flex; flex-wrap:wrap; gap:.6rem; align-items:center; justify-content:space-between;
+  background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.7rem .9rem;
+  box-shadow:0 6px 24px rgba(12,65,196,.06);
+}
+.alert-title{
+  font-weight:700; display:flex; align-items:center; gap:.5rem;
+}
+.pills{ display:flex; gap:.4rem; flex-wrap:wrap; }
+.pill{
+  display:inline-flex; align-items:center; gap:.4rem;
+  padding:.2rem .6rem; border-radius:999px; font-size:.78rem; font-weight:600;
+  border:1px solid var(--line); background:#fff;
+}
+.pill.urgent{ color:var(--magenta-brahms); border-color: rgba(206,0,113,.35); }
+.pill.soon{ color:var(--azul-mozart); border-color: rgba(12,65,196,.35); }
+.kebab{ color:var(--muted); }
+
+.alert-list{ display:flex; gap:.4rem; flex-wrap:wrap; }
+.alert-item{
+  border:1px dashed var(--line); border-radius:10px; padding:.45rem .6rem; background:#fff;
+  display:flex; align-items:center; gap:.5rem;
+  font-size:.9rem;
+}
+.alert-item .meta{ color:var(--muted); font-size:.8rem; }
+.alert-item .btn{
+  padding:.35rem .55rem;
+}
+
 /* Scroll horizontal si hay muchas columnas */
 .table-wrap{
   background:var(--card);
