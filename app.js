@@ -26,6 +26,9 @@
   const modalTitle    = document.getElementById('clientTitle');
   const modalSubtitle = document.getElementById('clientSubtitle');
 
+  // 🔔 Avisos de urgentes/agendados (en la página)
+  const alertsEl      = document.getElementById('alerts');
+
   // ------- Config -------
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
   const API_BASE = window.API_BASE;
@@ -72,7 +75,7 @@
     ],
     "Baile": [
       "Bailes Latinos","Danza clásica y contemporánea","Bailes Urbanos","Danzas folclóricas",
-      "Ballet","Salsa","Exploración corporal"
+      "Ballet","Salsa","Bongo"
     ],
     "Artes plásticas": [
       "Dibujo","Pintura","Óleo","Plastilina","Técnicas mixtas","Exploración Artística","Manualidades"
@@ -216,6 +219,9 @@
     }
     if (btnPrev) btnPrev.disabled = offset <= 0;
     if (btnNext) btnNext.disabled = offset + limit >= total;
+
+    // 🔔 Calcular y pintar alertas
+    await computeAndRenderAlerts();
   }
 
   function renderTable(headers, rows) {
@@ -286,6 +292,9 @@
     renderTable(headers, filtered);
 
     status(`Resultados: ${filtered.length.toLocaleString()} coincidencia(s) en “${currentSheet}”. (búsqueda global activa)`);
+
+    // actualizar alertas sobre el universo total (no solo filtrado)
+    await computeAndRenderAlerts();
   }
 
   // Carga TODA la hoja usando paginación del API y la junta
@@ -340,12 +349,23 @@
     originalRow = isNew ? null : { ...row };
 
     const nombre = String(row['Nombre'] ?? '').trim() || (isNew ? 'Nuevo cliente' : 'Cliente');
-    modalTitle.textContent = nombre;
 
+    // Subtítulo base
     const canal = String(row['Canal de comunicación'] ?? '').trim();
     const grupo = String(row['Grupo'] ?? '').trim();
     const arte1 = String(row['Arte I'] ?? '').trim();
-    modalSubtitle.textContent = [grupo, arte1, canal].filter(Boolean).join(' · ');
+    const baseSubtitle = [grupo, arte1, canal].filter(Boolean).join(' · ');
+
+    // 🟣 Mensajito de urgencia en el subtítulo
+    const urgency = classifyUrgency(row);
+    const urgencyMsg =
+      urgency.type === 'urgent' ? ` · ⚡ Urgente${urgency.when ? ` (${urgency.when})` : ''}` :
+      urgency.type === 'today'  ? ` · ⚡ Hoy` :
+      urgency.type === 'soon'   ? ` · 📅 Agendado ${urgency.when}` :
+      (urgency.type === 'ok' ? ' · ✅ Al día' : '');
+
+    modalTitle.textContent = nombre;
+    modalSubtitle.textContent = baseSubtitle + (urgencyMsg || '');
 
     const preferredOrder = [
       'ID','Listado1','Listado','Nombre','Celular/Teléfono','Correo Electrónico','Acudiente/Estudiante','Nombre de Estudiante',
@@ -629,6 +649,7 @@
       return date;
     }
     if (/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(s)) return s;
+    // Fallback: Date.parse en español es frágil; se retorna tal cual si no matchea.
     return s;
   }
 
@@ -662,5 +683,217 @@
       optHtml
     ].join('');
   }
-})();
 
+  /* =========================================================
+   * 7) ADD-ON · Cola guiada "Contactar clientes"
+   *     — Abre el MISMO modal estándar (edición) según el próximo pendiente.
+   * ========================================================= */
+
+  (function initContactButton() {
+    try {
+      const controlsBar = document.querySelector('.controls');
+      if (!controlsBar || !btnNew) return;
+
+      const btn = document.createElement('button');
+      btn.id = 'btnContact';
+      btn.type = 'button';
+      btn.className = 'btn';
+      btn.textContent = 'Contactar clientes';
+
+      controlsBar.insertBefore(btn, btnNew);
+      btn.addEventListener('click', openNextContactCard);
+    } catch (e) {
+      console.warn('No se pudo inyectar botón Contactar:', e);
+    }
+  })();
+
+  // 🔁 Pide una tarjeta al backend y abre el MISMO modal de edición
+  async function openNextContactCard() {
+    try {
+      const url = `${API_BASE}?mode=next&sheet=${encodeURIComponent(currentSheet)}&_ts=${Date.now()}`;
+      const res = await fetchJSON(url);
+      if (!res || !res.card || !res.card.ID) {
+        status('No hay pendientes por ahora 🙌');
+        alert('No hay pendientes por ahora 🙌');
+        return;
+      }
+
+      // Buscar fila completa por ID (render actual o cache)
+      const row = await getRowById(String(res.card.ID).trim());
+      if (!row) {
+        alert('No se encontró la fila en la hoja actual.');
+        return;
+      }
+
+      // Abre modal estándar y activa edición para escribir de una
+      openModal(row);
+      setTimeout(() => {
+        document.getElementById('btnEdit')?.click();
+      }, 0);
+
+    } catch (err) {
+      console.error(err);
+      status('Error pidiendo la siguiente tarjeta');
+      alert('Error pidiendo la siguiente tarjeta');
+    }
+  }
+
+  // Busca una fila por ID en las filas visibles o en el cache de toda la hoja
+  async function getRowById(id) {
+    const idKey = keyColumnInUse || 'ID';
+    let row = displayedRows.find(r => String(r[idKey] ?? '').trim() === id);
+    if (row) return row;
+
+    let cache = allRowsCache.get(currentSheet);
+    if (!cache) {
+      cache = await loadAllRowsForSheet(currentSheet);
+      allRowsCache.set(currentSheet, cache);
+    }
+    row = (cache.rows || []).find(r => String(r[idKey] ?? '').trim() === id);
+    return row || null;
+  }
+
+  /* =========================================================
+   * 8) Avisos (Urgentes y Agendados)
+   *     - Calcula desde la hoja con cache.
+   * ========================================================= */
+
+  async function computeAndRenderAlerts() {
+    if (!alertsEl) return;
+
+    // Traer cache o cargar todo
+    let cache = allRowsCache.get(currentSheet);
+    if (!cache) {
+      cache = await loadAllRowsForSheet(currentSheet);
+      allRowsCache.set(currentSheet, cache);
+    }
+
+    const rows = cache.rows || [];
+
+    const urgent = [];
+    const soon   = [];
+
+    rows.forEach(r => {
+      const u = classifyUrgency(r);
+      if (u.type === 'urgent' || u.type === 'today') urgent.push({row:r, when:u.whenSort || null});
+      else if (u.type === 'soon') soon.push({row:r, when:u.whenSort || null});
+    });
+
+    // Orden: fecha más próxima primero; prioridad Alta antes
+    const byWhen = (a,b) => {
+      if (a.when && b.when && a.when.getTime() !== b.when.getTime()) return a.when < b.when ? -1 : 1;
+      const ap = (String(a.row['Prioridad']||'').toLowerCase()==='alta')?0:1;
+      const bp = (String(b.row['Prioridad']||'').toLowerCase()==='alta')?0:1;
+      return ap - bp;
+    };
+    urgent.sort(byWhen);
+    soon.sort(byWhen);
+
+    renderAlertsUI(
+      urgent.slice(0,5).map(x=>x.row),
+      soon.slice(0,5).map(x=>x.row),
+      urgent.length, soon.length
+    );
+  }
+
+  function renderAlertsUI(urgentTop, soonTop, uCount, sCount){
+    if (!alertsEl) return;
+
+    if (uCount === 0 && sCount === 0) {
+      alertsEl.classList.add('hidden');
+      alertsEl.innerHTML = '';
+      return;
+    }
+
+    const makeItem = (r) => {
+      const name = (String(r['Nombre']||'').trim()) || '(Sin nombre)';
+      const prio = (String(r['Prioridad']||'').trim()) || '';
+      const canal = (String(r['Canal de comunicación'] || r['Canal'] || '').trim());
+      const when = minDate(parseYMD(r['Fecha para contactar']), parseYMD(r['Siguiente Contacto (calc)']));
+      const whenTxt = when ? formatYMD(when) : '—';
+      const id = String(r['ID']||'').trim();
+
+      return `
+        <div class="alert-item">
+          <strong>${esc(name)}</strong>
+          <span class="meta">· ${esc(prio || '—')}${canal?` · ${esc(canal)}`:''} · ${esc(whenTxt)}</span>
+          <button class="btn" data-openid="${escAttr(id)}">Abrir</button>
+        </div>
+      `;
+    };
+
+    alertsEl.innerHTML = `
+      <div class="alert-card">
+        <div class="alert-title">
+          <span>📞 Contactar clientes</span>
+          <span class="kebab">·</span>
+          <div class="pills">
+            <span class="pill urgent">Urgentes: ${uCount}</span>
+            <span class="pill soon">Agendados (≤3 días): ${sCount}</span>
+          </div>
+        </div>
+        <div class="alert-list">
+          ${urgentTop.map(makeItem).join('')}
+          ${soonTop.map(makeItem).join('')}
+        </div>
+      </div>
+    `;
+    alertsEl.classList.remove('hidden');
+
+    // Abrir modal desde el aviso
+    alertsEl.querySelectorAll('[data-openid]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-openid') || '';
+        const row = await getRowById(id);
+        if (row) {
+          openModal(row);
+          setTimeout(()=>document.getElementById('btnEdit')?.click(), 0);
+        } else {
+          alert('No se encontró la fila seleccionada.');
+        }
+      });
+    });
+  }
+
+  // -------- Urgencia: lógica común para modal y avisos --------
+  function classifyUrgency(row){
+    const prio = (String(row['Prioridad'] ?? '')).trim().toLowerCase();
+    const f1   = parseYMD(String(row['Fecha para contactar'] ?? ''));
+    const f2   = parseYMD(String(row['Siguiente Contacto (calc)'] ?? ''));
+    const when = minDate(f1, f2);
+
+    const today = toYMD(new Date());
+    const in3   = addDays(today, 3);
+
+    const dueOrPast = (d) => d && d <= today;
+    const within3   = (d) => d && d > today && d <= in3;
+
+    if (prio === 'alta' && dueOrPast(when)) return { type:'urgent', when: formatIf(when), whenSort: when };
+    if (prio === 'alta' && !when)           return { type:'urgent', when: '', whenSort: today };
+    if (dueOrPast(when))                    return { type: when && when.getTime() === today.getTime() ? 'today' : 'urgent', when: formatIf(when), whenSort: when || today };
+    if (within3(when))                      return { type:'soon', when: formatIf(when), whenSort: when };
+    return { type:'ok', when:'', whenSort: null };
+  }
+
+  /* =============================
+     9) Helpers de fecha reutilizados
+     ============================= */
+  function toYMD(d){ return d instanceof Date ? new Date(d.getFullYear(), d.getMonth(), d.getDate()) : null; }
+  function addDays(d, n){ const x = new Date(d); x.setDate(x.getDate()+n); return toYMD(x); }
+  function minDate(a,b){ if (a && b) return a<b?a:b; return a||b||null; }
+  function parseYMD(s){
+    if (!s) return null;
+    const iso = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (iso) return toYMD(new Date(Number(iso[1]), Number(iso[2])-1, Number(iso[3])));
+    const dmy = s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    if (dmy){
+      const dd = Number(dmy[1]), mm = Number(dmy[2])-1, yyyy = dmy[3].length===2 ? Number('20'+dmy[3]) : Number(dmy[3]);
+      return toYMD(new Date(yyyy, mm, dd));
+    }
+    return null;
+  }
+  function pad2(n){ return String(n).padStart(2,'0'); }
+  function formatYMD(d){ return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`; }
+  function formatIf(d){ return d ? formatYMD(d) : ''; }
+
+})();
