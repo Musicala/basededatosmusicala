@@ -394,6 +394,20 @@
         input = `<input id="${id}" name="${escAttr(h)}" class="in control" type="text"
                  value="${escAttr(String(raw))}" readonly data-lock="1" />`;
 
+      // Campo Acudiente/Estudiante
+      } else if (headerName === 'Acudiente/Estudiante') {
+        const opts = ["Acudiente","Estudiante"];
+        input = selectHTML(id, h, opts, String(raw), !isNew);
+
+      // Campo Edad
+      } else if (headerName === 'Edad') {
+        input = `<input id="${id}" name="${escAttr(h)}" class="in control" type="number" min="0" value="${escAttr(String(raw))}" ${!isNew ? 'readonly' : ''} />`;
+
+      // Campo ¿Tiene el instrumento?
+      } else if (headerName === '¿Tiene el instrumento?') {
+        const opts = ["Sí","No"];
+        input = selectHTML(id, h, opts, String(raw), !isNew);
+
       // Selects fijos
       } else if (OPTIONS[headerName]) {
         const opts = OPTIONS[headerName];
