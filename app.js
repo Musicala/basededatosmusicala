@@ -102,6 +102,8 @@
   let originalRow    = null;
   let keyColumnInUse = '';
   let creatingNew    = false;
+  // Orden de columnas (sorting)
+  let sortState = { key: null, dir: 1 }; // dir: 1 = asc, -1 = desc
 
   // ===== Búsqueda GLOBAL =====
   const allRowsCache = new Map(); // sheet -> { headers, rows, total, ts }
@@ -225,77 +227,70 @@
   }
 
   function renderTable(headers, rows) {
-    const nameIdx = headers.findIndex((h) => h.trim().toLowerCase() === 'nombre');
+  const nameIdx = headers.findIndex((h) => h.trim().toLowerCase() === 'nombre');
 
-    const thead = `<thead><tr>${
-      headers.map((h) => `<th>${esc(h)}</th>`).join('')
-    }</tr></thead>`;
+  // Construye THEAD con headers “clicables” para ordenar
+  const thead = `<thead><tr>${
+    headers.map((h) => {
+      const isActive = sortState.key === h;
+      const dirAttr  = isActive ? ` data-dir="${sortState.dir}"` : '';
+      return `<th class="th-sortable" data-key="${escAttr(h)}"${dirAttr}>
+                <span>${esc(h)}</span>
+                <span class="th-sort-ind"></span>
+              </th>`;
+    }).join('')
+  }</tr></thead>`;
 
-    const tbody = `<tbody>${
-      rows.map((r, i) => {
-        const tds = headers.map((h, colIdx) => {
-          const val = r[h];
-          if (colIdx === nameIdx) {
-            const label = (val == null || String(val).trim() === '') ? '(Sin nombre)' : String(val);
-            return `<td><button class="linkish name-link" data-rowindex="${i}">${esc(label)}</button></td>`;
-          }
-          return `<td>${pretty(val)}</td>`;
-        }).join('');
-        return `<tr>${tds}</tr>`;
-      }).join('')
-    }</tbody>`;
-
-    table.innerHTML = thead + tbody;
-
-    // fuerza ancho mínimo por cantidad de columnas (para scroll horizontal)
-    const pxPerCol = 140;
-    table.style.minWidth = (headers.length * pxPerCol) + 'px';
+  // Si hay una columna activa, ordena una copia de las filas visibles
+  let toRender = rows;
+  if (sortState.key) {
+    const key = sortState.key;
+    const dir = sortState.dir;
+    toRender = [...rows].map((r, i) => ({ r, i })) // estable para empates
+      .sort((a, b) => {
+        const cmp = compareByKey(a.r, b.r, key);
+        return (cmp !== 0) ? (cmp * dir) : (a.i - b.i);
+      })
+      .map(x => x.r);
   }
 
-  /* =============================
-     4) Búsqueda GLOBAL
-     ============================= */
-  async function applySearch() {
-    const q = searchBox.value.trim().toLowerCase();
+  const tbody = `<tbody>${
+    toRender.map((r, i) => {
+      const tds = headers.map((h, colIdx) => {
+        const val = r[h];
+        if (colIdx === nameIdx) {
+          const label = (val == null || String(val).trim() === '') ? '(Sin nombre)' : String(val);
+          return `<td><button class="linkish name-link" data-rowindex="${i}">${esc(label)}</button></td>`;
+        }
+        return `<td>${pretty(val)}</td>`;
+      }).join('');
+      return `<tr>${tds}</tr>`;
+    }).join('')
+  }</tbody>`;
 
-    if (!q) {
-      // limpiar búsqueda -> volver a paginación normal
-      searchActive = false;
-      pagerEl?.classList.remove('hidden');
-      await loadPage();
-      return;
-    }
+  table.innerHTML = thead + tbody;
 
-    // activar búsqueda global
-    searchActive = true;
-    pagerEl?.classList.add('hidden');
-    status('Buscando en toda la hoja…');
+  // fuerza ancho mínimo por cantidad de columnas (para scroll horizontal)
+  const pxPerCol = 140;
+  table.style.minWidth = (headers.length * pxPerCol) + 'px';
 
-    // cachear si no está
-    let cache = allRowsCache.get(currentSheet);
-    if (!cache) {
-      cache = await loadAllRowsForSheet(currentSheet);
-      allRowsCache.set(currentSheet, cache);
-    }
-
-    // filtrar
-    const headers = cache.headers || [];
-    const rows    = cache.rows    || [];
-
-    const filtered = rows.filter((r) => {
-      // une todos los valores de la fila para una búsqueda simple
-      const text = headers.map(h => String(r[h] ?? '')).join(' ◦ ').toLowerCase();
-      return text.includes(q);
+  // Listeners para ordenar al hacer clic en el TH
+  table.querySelectorAll('thead th.th-sortable').forEach(th => {
+    th.addEventListener('click', () => {
+      const key = th.getAttribute('data-key') || '';
+      if (!key) return;
+      if (sortState.key === key) {
+        // alterna asc/desc
+        sortState.dir = sortState.dir === 1 ? -1 : 1;
+      } else {
+        sortState.key = key;
+        sortState.dir = 1;
+      }
+      // re-render con el nuevo estado de orden
+      renderTable(headers, rows);
     });
-
-    displayedRows = filtered;
-    renderTable(headers, filtered);
-
-    status(`Resultados: ${filtered.length.toLocaleString()} coincidencia(s) en “${currentSheet}”. (búsqueda global activa)`);
-
-    // actualizar alertas sobre el universo total (no solo filtrado)
-    await computeAndRenderAlerts();
-  }
+  });
+}
 
   // Carga TODA la hoja usando paginación del API y la junta
   async function loadAllRowsForSheet(sheetName) {
@@ -697,6 +692,45 @@
       optHtml
     ].join('');
   }
+
+  function compareByKey(a, b, key) {
+  const A = normalizeForSort(a?.[key]);
+  const B = normalizeForSort(b?.[key]);
+
+  // Nulls/vacíos al final
+  const aNull = (A === null || A === undefined || A === '');
+  const bNull = (B === null || B === undefined || B === '');
+  if (aNull && bNull) return 0;
+  if (aNull) return 1;
+  if (bNull) return -1;
+
+  // Fechas
+  if (A instanceof Date && B instanceof Date) return A - B;
+
+  // Números
+  if (typeof A === 'number' && typeof B === 'number') return A - B;
+
+  // Texto (insensible a mayúsculas/acentos)
+  return String(A).localeCompare(String(B), 'es', { sensitivity: 'base', ignorePunctuation: true });
+}
+
+function normalizeForSort(v) {
+  if (v == null) return '';
+  const s = String(v).trim();
+
+  // ¿Fecha tipo YYYY-MM-DD o DD/MM/YYYY? (aprovechamos tus helpers)
+  const d = parseYMD(s);
+  if (d instanceof Date && !isNaN(d)) return d;
+
+  // ¿Número? (admite comas/puntos y símbolos simples)
+  const numericish = s.replace(/[^\d.\-]/g, '');
+  if (numericish && /^-?\d+(\.\d+)?$/.test(numericish)) {
+    const n = Number(numericish);
+    if (!isNaN(n)) return n;
+  }
+
+  return s.toLowerCase();
+}
 
   /* =========================================================
    * 7) ADD-ON · Cola guiada "Contactar clientes"
