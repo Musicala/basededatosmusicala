@@ -242,3 +242,12 @@ body.modal-open{ overflow:hidden; }
 .muted { color: var(--muted); font-size: .9rem; }
 .btn { border:1px solid var(--line); background:#fff; border-radius:.6rem; padding:.5rem .8rem; cursor:pointer; }
 .btn:disabled{ opacity:.5; cursor:not-allowed; }
+
+/* Encabezados ordenables */
+.data-table th.th-sortable { cursor: pointer; user-select: none; }
+.data-table th.th-sortable .th-sort-ind {
+  display: inline-block; margin-left: .35rem; font-size: .85em; color: var(--muted);
+}
+.data-table th.th-sortable .th-sort-ind::after { content: "↕"; }
+.data-table th.th-sortable[data-dir="1"] .th-sort-ind::after { content: "↑"; }
+.data-table th.th-sortable[data-dir="-1"] .th-sort-ind::after { content: "↓"; }
