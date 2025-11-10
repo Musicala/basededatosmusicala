@@ -313,6 +313,65 @@
     return { headers, rows: all, total: tot, ts: Date.now() };
   }
 
+  // =============================
+// 4) Búsqueda GLOBAL (falta en tu archivo)
+// =============================
+async function applySearch() {
+  const q = (searchBox?.value || '').trim();
+  if (!q) {
+    // Sin consulta: volver al paginado normal
+    searchActive = false;
+    pagerEl?.classList.remove('hidden');
+    displayedRows = currentRows;
+    renderTable(currentHeaders, displayedRows);
+    const page  = Math.floor(offset / limit) + 1;
+    const pages = Math.max(1, Math.ceil(total / limit));
+    if (pageInfo) pageInfo.textContent = `Página ${page.toLocaleString()} de ${pages.toLocaleString()} — ${total.toLocaleString()} registros`;
+    status(`Listo. Clave: “${keyColumnInUse || '—'}”. Mostrando ${currentRows.length.toLocaleString()} de ${total.toLocaleString()} registros.`);
+    return;
+  }
+
+  try {
+    searchActive = true;
+    pagerEl?.classList.add('hidden');
+    status('Buscando en toda la hoja…');
+
+    // Traer cache o cargar todo el contenido de la hoja
+    let cache = allRowsCache.get(currentSheet);
+    if (!cache) {
+      cache = await loadAllRowsForSheet(currentSheet);
+      allRowsCache.set(currentSheet, cache);
+    }
+
+    const norm = (s) => String(s ?? '')
+      .toLowerCase()
+      .normalize('NFD').replace(/\p{Diacritic}/gu,'')
+      .trim();
+
+    const terms = norm(q).split(/\s+/).filter(Boolean);
+
+    const rows = cache.rows || [];
+    const headers = cache.headers || currentHeaders;
+
+    const filtered = rows.filter(r => {
+      // Concatenar todos los valores de la fila
+      const blob = norm(headers.map(h => r[h]).join(' | '));
+      // AND de términos
+      return terms.every(t => blob.includes(t));
+    });
+
+    displayedRows = filtered;
+    renderTable(headers, displayedRows);
+
+    status(`Resultado: ${filtered.length.toLocaleString()} coincidencia(s) en “${currentSheet}”.`);
+    if (pageInfo) pageInfo.textContent = `Filtrado — ${filtered.length.toLocaleString()} coincidencia(s)`;
+
+  } catch (err) {
+    console.error(err);
+    status(`⚠️ Error en la búsqueda: ${err?.message || err}`);
+  }
+}
+
   /* =============================
      5) Modales
      ============================= */
