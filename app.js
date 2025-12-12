@@ -38,7 +38,7 @@
 
   // ====== Catálogos (listas fijas) ======
   const OPTIONS = {
-    Grupo: ["Musiadultos","Musibabies","Musicalitos","Musigrandes","Musikids","Musiteens"],
+    Grupo: ["Musibabies","Musicalitos","Musikids","Musiteens","Musigrandes","Musiadultos"],
     ARTE: ["Música","Baile","Artes plásticas","Teatro","Vacacionales","Todos"],
     Modalidad: [
       "Domicilio","Hogar y virtual","Sede","Sede,Virtual y Domicilio",
@@ -1004,3 +1004,4 @@ function normalizeForSort(v) {
   function formatIf(d){ return d ? formatYMD(d) : ''; }
 
 })();
+
