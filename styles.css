@@ -251,3 +251,11 @@ body.modal-open{ overflow:hidden; }
 .data-table th.th-sortable .th-sort-ind::after { content: "↕"; }
 .data-table th.th-sortable[data-dir="1"] .th-sort-ind::after { content: "↑"; }
 .data-table th.th-sortable[data-dir="-1"] .th-sort-ind::after { content: "↓"; }
+
+.btn-whatsapp{
+  background:#25D366;
+  color:#fff;
+  border:1px solid rgba(0,0,0,.05);
+  font-weight:600;
+}
+.btn-whatsapp:hover{ background:#1ebe5d; }
