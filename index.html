@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Callcenter · Musicala</title>
+  <title>Seguimiento Comercial · Musicala</title>
 
   <!-- Fuente y estilos -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -13,7 +13,7 @@
   <!-- Evita caches agresivos mientras iteramos -->
   <meta http-equiv="Cache-Control" content="no-store, max-age=0" />
   <meta name="theme-color" content="#0C41C4" />
-  <meta name="description" content="Visor de base de datos conectado a Google Sheets vía Apps Script.">
+  <meta name="description" content="Seguimiento comercial de Musicala.">
 
   <link rel="stylesheet" href="styles.css" />
 </head>
@@ -23,8 +23,8 @@
       <!-- IMPORTANTE: ruta explícita ./logo.png y fondo blanco para contraste -->
       <img src="./logo.png" alt="Musicala" class="logo" width="44" height="44" />
       <div>
-        <h1>Callcenter · Musicala</h1>
-        <p class="subtitle">Visor de base de datos — conectado a Google Sheets</p>
+        <h1>Seguimiento Comercial · Musicala</h1>
+        <p class="subtitle">Seguimiento de inscritos, interesados y contactos pendientes</p>
       </div>
     </div>
 
@@ -39,13 +39,39 @@
 
       <!-- botón crear registro -->
       <button id="btnNew" class="btn" type="button" title="Crear nuevo cliente">+ Nuevo</button>
+      <button id="btnSyncFirebase" class="btn" type="button" title="Actualizar la base de datos">Actualizar datos</button>
+      <button id="btnSyncSheets" class="btn" type="button" title="Guardar cambios en la base principal">Guardar en principal</button>
     </div>
   </header>
 
   <main class="container">
+    <section class="sync-panel" aria-label="Estado de sincronización">
+      <div>
+        <strong>Acceso seguro.</strong>
+        <span id="firebaseStatus">Ingresa con tu cuenta autorizada para ver la base de datos.</span>
+      </div>
+      <div class="sync-actions">
+        <small>Usa Actualizar datos para traer la información más reciente.</small>
+        <button id="btnGoogleLogin" class="btn" type="button">Ingresar con Google</button>
+      </div>
+    </section>
+
+    <section id="progressPanel" class="progress-panel hidden" aria-live="polite">
+      <div class="progress-head">
+        <strong id="progressTitle">Actualizando datos</strong>
+        <span id="progressPercent">0%</span>
+      </div>
+      <div class="progress-track">
+        <div id="progressBar" class="progress-bar" style="width:0%"></div>
+      </div>
+      <p id="progressText">Preparando...</p>
+    </section>
+
     <div id="status" class="status">
       <span class="spinner" aria-hidden="true">⏳</span> Cargando…
     </div>
+
+    <section id="alerts" class="alerts hidden" aria-label="Avisos de seguimiento"></section>
 
     <div class="table-wrap" role="region" aria-live="polite">
       <table id="dataTable" class="data-table" aria-describedby="status"></table>
@@ -99,7 +125,19 @@
   <!-- Endpoint ÚNICO (tu implementación /exec) -->
   <script>
     window.API_BASE = 'https://script.google.com/macros/s/AKfycbyxWZ7VUOYE93-idh1e8QNaUQ9ofoHNEl6lb8hjhwkRt3QbUAXtAbio19uOasftNvdz/exec';
+    window.FIREBASE_CONFIG = {
+      apiKey: 'AIzaSyD5cHVQiZzYACLYoWEfOrTO37hDoMfpsDg',
+      authDomain: 'db-musicala.firebaseapp.com',
+      projectId: 'db-musicala',
+      storageBucket: 'db-musicala.firebasestorage.app',
+      messagingSenderId: '511593925043',
+      appId: '1:511593925043:web:326e4fb5afa5a8c0a563c6'
+    };
   </script>
+
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-firestore-compat.js"></script>
 
   <!-- App -->
   <script src="app.js"></script>

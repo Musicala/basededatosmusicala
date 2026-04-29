@@ -1,5 +1,5 @@
 /* =============================
-   app.js — Callcenter Musicala
+   app.js — Seguimiento Comercial Musicala
    Paginación + búsqueda global + modal editable (v1.2)
    + Botón WhatsApp debajo del celular (robusto)
    + Fix click con ordenamiento (rowindex consistente)
@@ -14,6 +14,15 @@
   const sheetSel   = document.getElementById('sheetSelect');
   const searchBox  = document.getElementById('search');
   const btnNew     = document.getElementById('btnNew');
+  const btnSyncFirebase = document.getElementById('btnSyncFirebase');
+  const btnSyncSheets = document.getElementById('btnSyncSheets');
+  const btnGoogleLogin = document.getElementById('btnGoogleLogin');
+  const firebaseStatusEl = document.getElementById('firebaseStatus');
+  const progressPanel = document.getElementById('progressPanel');
+  const progressTitle = document.getElementById('progressTitle');
+  const progressPercent = document.getElementById('progressPercent');
+  const progressBar = document.getElementById('progressBar');
+  const progressText = document.getElementById('progressText');
 
   // Paginación
   const pagerEl    = document.getElementById('pager');
@@ -34,6 +43,14 @@
   // ------- Config -------
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
   const API_BASE = window.API_BASE;
+  const ALLOWED_EMAILS = [
+    'alekcaballeromusic@gmail.com',
+    'catalina.medina.leal@gmail.com',
+    'musicalaasesor@gmail.com',
+    'imusicala@gmail.com'
+  ];
+  const firebaseDb = initFirebaseCache();
+  const authReady = waitForFirebaseAuth();
 
   // 🔒 Clave SOLO "ID"
   const KEY_CANDIDATES = ['ID'];
@@ -114,10 +131,20 @@
 
   // OJO: displayedRows SIEMPRE debe ser exactamente lo que está renderizado
   let displayedRows  = []; // filas actualmente renderizadas (página o filtradas y/o ordenadas)
+  btnGoogleLogin?.addEventListener('click', () => signInWithGoogle());
 
   /* =============================
      1) Cargar hojas + primera página
      ============================= */
+  lockDataUI(true);
+  const authUser = await authReady;
+  if (!authUser || !isAllowedUser(authUser)) {
+    status(authUser ? 'Esta cuenta no tiene permiso para cargar la base de datos.' : 'Ingresa con Google para cargar la base de datos.');
+    renderLockedTable();
+    return;
+  }
+  lockDataUI(false);
+
   const meta = await fetchJSON(`${API_BASE}?mode=meta&_ts=${Date.now()}`).catch(showError);
   if (!meta || !Array.isArray(meta.sheets) || meta.sheets.length === 0) {
     status('No se encontraron hojas.');
@@ -132,6 +159,7 @@
   sheetSel.value = initial;
   currentSheet   = initial;
 
+  await runDailySyncIfNeeded();
   await loadPage();
 
   /* =============================
@@ -177,7 +205,22 @@
 
   // Nuevo cliente
   btnNew?.addEventListener('click', () => openNewModal());
-
+  btnSyncFirebase?.addEventListener('click', async () => {
+    try {
+      btnSyncFirebase.disabled = true;
+      await syncCurrentSheetToFirebase(true);
+    } finally {
+      btnSyncFirebase.disabled = false;
+    }
+  });
+  btnSyncSheets?.addEventListener('click', async () => {
+    try {
+      btnSyncSheets.disabled = true;
+      await syncPendingFirebaseToSheets(true);
+    } finally {
+      btnSyncSheets.disabled = false;
+    }
+  });
   // Delegación: click en el "Nombre" abre modal de edición
   table.addEventListener('click', (e) => {
     const btn = e.target.closest('.name-link');
@@ -200,6 +243,25 @@
      ============================= */
   async function loadPage() {
     status(`Cargando “${currentSheet}”…`);
+    const cached = await loadSheetFromFirebase(currentSheet);
+    if (cached) {
+      currentHeaders = cached.headers;
+      total = cached.total;
+      currentRows = (cached.rows || []).slice(offset, offset + limit);
+      keyColumnInUse = pickKeyColumn(currentHeaders);
+      renderTable(currentHeaders, currentRows);
+
+      const page  = Math.floor(offset / limit) + 1;
+      const pages = Math.max(1, Math.ceil(total / limit));
+      if (pageInfo) pageInfo.textContent = `Página ${page.toLocaleString()} de ${pages.toLocaleString()} — ${total.toLocaleString()} registros`;
+      if (btnPrev) btnPrev.disabled = offset <= 0;
+      if (btnNext) btnNext.disabled = offset + limit >= total;
+      status(`Listo. Mostrando ${currentRows.length.toLocaleString()} de ${total.toLocaleString()} registros.`);
+      allRowsCache.set(currentSheet, cached);
+      await computeAndRenderAlerts();
+      return;
+    }
+
     const url = `${API_BASE}?mode=data&sheet=${encodeURIComponent(currentSheet)}&limit=${limit}&offset=${offset}&_ts=${Date.now()}`;
     const res = await fetchJSON(url).catch(showError);
     if (!res || !Array.isArray(res.headers)) {
@@ -298,6 +360,13 @@
 
   // Carga TODA la hoja y la junta
   async function loadAllRowsForSheet(sheetName) {
+    const cached = await loadSheetFromFirebase(sheetName);
+    if (cached) return cached;
+
+    return fetchAllRowsFromSheets(sheetName, true);
+  }
+
+  async function fetchAllRowsFromSheets(sheetName, mirrorToFirebase = false) {
     const first = await fetchJSON(`${API_BASE}?mode=data&sheet=${encodeURIComponent(sheetName)}&limit=1&offset=0&_ts=${Date.now()}`);
     const headers = first.headers || [];
 
@@ -312,11 +381,20 @@
       const rows = res.rows || [];
       tot = parseInt(res.total || rows.length, 10);
       all = all.concat(rows);
+      if (mirrorToFirebase && tot > 0) {
+        const pct = 55 + Math.min(25, Math.round((all.length / tot) * 25));
+        setProgress(pct, `Leyendo registros (${Math.min(all.length, tot).toLocaleString()} de ${tot.toLocaleString()})...`);
+      }
       off += pageLimit;
       if (all.length >= tot || rows.length === 0) break;
     }
 
-    return { headers, rows: all, total: tot, ts: Date.now() };
+    const payload = { headers, rows: all, total: tot, ts: Date.now(), source: 'sheets' };
+    if (mirrorToFirebase) {
+      setProgress(82, 'Guardando datos para una carga más rápida...');
+      await saveSheetToFirebase(sheetName, payload).catch((err) => console.warn('No se pudo actualizar Firebase:', err));
+    }
+    return payload;
   }
 
   /* =============================
@@ -487,6 +565,8 @@
             throw new Error(msg);
           }
           saveStatus.textContent = 'Creado ✓';
+          allRowsCache.delete(currentSheet);
+          await syncCurrentSheetToFirebase(false);
           await loadPage();
           closeModal();
           return;
@@ -508,23 +588,9 @@
           return;
         }
 
-        const body = new URLSearchParams({
-          mode: 'update',
-          sheet: currentSheet,
-          keyCol: keyColumnInUse,
-          key,
-          row: JSON.stringify(changes)
-        });
-
-        const r = await fetch(API_BASE, { method:'POST', headers:{Accept:'application/json'}, body });
-        let json = null, txt = '';
-        try { json = await r.json(); } catch (_) { txt = await r.text(); }
-        if (!r.ok || json?.ok !== true) {
-          const msg = (json && json.error) || txt || `HTTP ${r.status}`;
-          throw new Error(msg);
-        }
-
-        saveStatus.textContent = 'Guardado ✓';
+        await saveRowToFirebase(currentSheet, { ...originalRow, ...formValues }, true);
+        saveStatus.textContent = 'Guardado ✓ Pendiente de enviar a principal';
+        allRowsCache.delete(currentSheet);
         await loadPage();
         closeModal();
 
@@ -657,7 +723,346 @@
   }
 
   /* =============================
-     6) Utilidades
+     6) Firebase como cache de lectura
+     ============================= */
+  function initFirebaseCache() {
+    const cfg = window.FIREBASE_CONFIG || {};
+    const ready = cfg.apiKey && cfg.authDomain && cfg.projectId && window.firebase?.initializeApp;
+    if (!ready) {
+      setFirebaseStatus('No se pudo preparar el acceso seguro.');
+      btnSyncFirebase?.setAttribute('disabled', 'disabled');
+      return null;
+    }
+
+    try {
+      const app = window.firebase.apps?.length ? window.firebase.app() : window.firebase.initializeApp(cfg);
+      wireFirebaseAuth();
+      setFirebaseStatus('Ingresa con Google para ver la base de datos.');
+      return window.firebase.firestore(app);
+    } catch (err) {
+      console.error(err);
+      setFirebaseStatus('No se pudo iniciar el acceso seguro.');
+      btnSyncFirebase?.setAttribute('disabled', 'disabled');
+      return null;
+    }
+  }
+
+  function wireFirebaseAuth() {
+    if (!window.firebase?.auth) return;
+    const auth = window.firebase.auth();
+    btnSyncFirebase?.setAttribute('disabled', 'disabled');
+
+    auth.onAuthStateChanged((user) => {
+      if (user?.email && isAllowedUser(user)) {
+        btnSyncFirebase?.removeAttribute('disabled');
+        btnSyncSheets?.removeAttribute('disabled');
+        if (btnGoogleLogin) btnGoogleLogin.textContent = user.email;
+        setFirebaseStatus(`Sesión iniciada: ${user.email}. Ya puedes consultar y actualizar datos.`);
+      } else if (user?.email) {
+        btnSyncFirebase?.setAttribute('disabled', 'disabled');
+        btnSyncSheets?.setAttribute('disabled', 'disabled');
+        if (btnGoogleLogin) btnGoogleLogin.textContent = user.email;
+        setFirebaseStatus(`La cuenta ${user.email} no esta autorizada para esta base.`);
+      } else {
+        btnSyncFirebase?.setAttribute('disabled', 'disabled');
+        btnSyncSheets?.setAttribute('disabled', 'disabled');
+        if (btnGoogleLogin) btnGoogleLogin.textContent = 'Ingresar con Google';
+        setFirebaseStatus('Ingresa con Google para ver la base de datos.');
+      }
+    });
+  }
+
+  function isAllowedUser(user) {
+    const email = String(user?.email || '').toLowerCase();
+    return ALLOWED_EMAILS.includes(email);
+  }
+
+  function waitForFirebaseAuth() {
+    if (!window.firebase?.auth) {
+      setFirebaseStatus('No se pudo preparar el inicio de sesión.');
+      return Promise.resolve(null);
+    }
+
+    return new Promise((resolve) => {
+      const stop = window.firebase.auth().onAuthStateChanged((user) => {
+        stop();
+        resolve(user || null);
+      });
+    });
+  }
+
+  async function signInWithGoogle() {
+    if (!window.firebase?.auth) {
+      setFirebaseStatus('No se pudo abrir el inicio de sesión.');
+      return;
+    }
+    try {
+      const provider = new window.firebase.auth.GoogleAuthProvider();
+      await window.firebase.auth().signInWithPopup(provider);
+      window.location.reload();
+    } catch (err) {
+      console.error(err);
+      setFirebaseStatus('No se pudo iniciar sesión. Revisa que uses una cuenta autorizada.');
+    }
+  }
+
+  function lockDataUI(locked) {
+    [sheetSel, searchBox, btnNew, btnSyncFirebase, btnSyncSheets].forEach((el) => {
+      if (!el) return;
+      el.disabled = locked || ((el === btnSyncFirebase || el === btnSyncSheets) && !firebaseDb);
+    });
+    if (locked) {
+      sheetSel.innerHTML = '<option>Inicia sesion</option>';
+      searchBox.value = '';
+      alertsEl?.classList.add('hidden');
+      pagerEl?.classList.add('hidden');
+    } else {
+      pagerEl?.classList.remove('hidden');
+    }
+  }
+
+  function renderLockedTable() {
+    table.innerHTML = `
+      <tbody>
+        <tr>
+          <td class="locked-cell">
+            Ingresa con Google para ver la base de datos.
+          </td>
+        </tr>
+      </tbody>
+    `;
+    table.style.minWidth = '100%';
+  }
+
+  function setFirebaseStatus(msg) {
+    if (firebaseStatusEl) firebaseStatusEl.textContent = msg;
+  }
+
+  function showProgress(title, text, percent = 0) {
+    if (!progressPanel) return;
+    progressPanel.classList.remove('hidden');
+    if (progressTitle) progressTitle.textContent = title;
+    setProgress(percent, text);
+  }
+
+  function setProgress(percent, text) {
+    const safe = Math.max(0, Math.min(100, Number(percent) || 0));
+    if (progressPercent) progressPercent.textContent = `${safe}%`;
+    if (progressBar) progressBar.style.width = `${safe}%`;
+    if (progressText && text) progressText.textContent = text;
+  }
+
+  function hideProgress() {
+    progressPanel?.classList.add('hidden');
+  }
+
+  function sheetDoc(sheetName) {
+    if (!firebaseDb) return null;
+    return firebaseDb.collection('sheetCache').doc(slug(sheetName) || 'hoja');
+  }
+
+  function rowDocId(row, index) {
+    const id = String(row?.ID ?? '').trim();
+    return id ? slug(id) : `fila-${index + 1}`;
+  }
+
+  async function loadSheetFromFirebase(sheetName) {
+    if (!firebaseDb) return null;
+
+    try {
+      const doc = sheetDoc(sheetName);
+      const metaSnap = await doc.get();
+      if (!metaSnap.exists) return null;
+
+      const rowSnap = await doc.collection('rows').get();
+      if (rowSnap.empty) return null;
+
+      const meta = metaSnap.data() || {};
+      const rows = rowSnap.docs.map(d => d.data().data || d.data());
+      const headers = Array.isArray(meta.headers) && meta.headers.length
+        ? meta.headers
+        : Array.from(rows.reduce((set, row) => {
+            Object.keys(row || {}).forEach(k => set.add(k));
+            return set;
+          }, new Set()));
+
+      setFirebaseStatus(`Base lista: ${rows.length.toLocaleString()} registros disponibles.`);
+      return { headers, rows, total: rows.length, ts: meta.updatedAt || Date.now(), source: 'firebase' };
+    } catch (err) {
+      console.warn('No se pudo leer la base rapida, se usara respaldo:', err);
+      setFirebaseStatus('Cargando información actualizada...');
+      return null;
+    }
+  }
+
+  async function saveSheetToFirebase(sheetName, payload) {
+    if (!firebaseDb || !payload?.rows?.length) return;
+
+    const doc = sheetDoc(sheetName);
+    const batchSize = 400;
+    const rows = payload.rows || [];
+
+    await doc.set({
+      sheetName,
+      headers: payload.headers || [],
+      total: rows.length,
+      updatedAt: Date.now(),
+      source: 'sheets'
+    }, { merge: true });
+
+    for (let start = 0; start < rows.length; start += batchSize) {
+      const batch = firebaseDb.batch();
+      rows.slice(start, start + batchSize).forEach((row, i) => {
+        batch.set(doc.collection('rows').doc(rowDocId(row, start + i)), {
+          data: row,
+          updatedAt: Date.now(),
+          pendingSheetSync: false,
+          pendingReason: '',
+          syncedAt: Date.now()
+        }, { merge: true });
+      });
+      await batch.commit();
+    }
+
+    setFirebaseStatus(`Datos actualizados: ${rows.length.toLocaleString()} registros disponibles.`);
+  }
+
+  async function saveRowToFirebase(sheetName, row, pendingSheetSync = false) {
+    if (!firebaseDb) throw new Error('No se pudo guardar el cambio rapido.');
+    const doc = sheetDoc(sheetName);
+    const id = rowDocId(row, 0);
+    if (!id) throw new Error('El registro no tiene ID.');
+
+    await doc.collection('rows').doc(id).set({
+      data: row,
+      updatedAt: Date.now(),
+      pendingSheetSync,
+      pendingReason: pendingSheetSync ? 'edit' : '',
+      syncedAt: pendingSheetSync ? null : Date.now()
+    }, { merge: true });
+
+    await doc.set({
+      sheetName,
+      updatedAt: Date.now()
+    }, { merge: true });
+  }
+
+  async function updateRowInSheets(sheetName, row) {
+    const keyCol = keyColumnInUse || pickKeyColumn(Object.keys(row || {}));
+    const key = String(row?.[keyCol] ?? '').trim();
+    if (!keyCol || !key) throw new Error('No se encontro ID para actualizar la base principal.');
+
+    const changes = { ...row };
+    delete changes.ID;
+
+    const body = new URLSearchParams({
+      mode: 'update',
+      sheet: sheetName,
+      keyCol,
+      key,
+      row: JSON.stringify(changes)
+    });
+
+    const r = await fetch(API_BASE, { method:'POST', headers:{Accept:'application/json'}, body });
+    let json = null, txt = '';
+    try { json = await r.json(); } catch (_) { txt = await r.text(); }
+    if (!r.ok || json?.ok !== true) {
+      const msg = (json && json.error) || txt || `HTTP ${r.status}`;
+      throw new Error(msg);
+    }
+  }
+
+  async function syncPendingFirebaseToSheets(showMessages = false) {
+    if (!firebaseDb) {
+      setFirebaseStatus('No se pudo guardar en la base principal en este momento.');
+      return;
+    }
+
+    const doc = sheetDoc(currentSheet);
+    const snap = await doc.collection('rows').where('pendingSheetSync', '==', true).get();
+    if (snap.empty) {
+      if (showMessages) status('No hay cambios pendientes por guardar en la base principal.');
+      return;
+    }
+
+    if (showMessages) status(`Guardando ${snap.size.toLocaleString()} cambio(s) en la base principal...`);
+
+    let done = 0;
+    for (const rowDoc of snap.docs) {
+      const payload = rowDoc.data() || {};
+      const row = payload.data || {};
+      setProgress(Math.round((done / snap.size) * 100), `Guardando cambios en la base principal (${done + 1} de ${snap.size})...`);
+      await updateRowInSheets(currentSheet, row);
+      await rowDoc.ref.set({
+        pendingSheetSync: false,
+        pendingReason: '',
+        syncedAt: Date.now()
+      }, { merge: true });
+      done += 1;
+    }
+
+    allRowsCache.delete(currentSheet);
+    if (showMessages) status(`${done.toLocaleString()} cambio(s) guardados en la base principal.`);
+  }
+
+  async function runDailySyncIfNeeded() {
+    if (!firebaseDb || !currentSheet) return;
+
+    const doc = sheetDoc(currentSheet);
+    const today = formatYMD(toYMD(new Date()));
+    const snap = await doc.get().catch(() => null);
+    const meta = snap?.exists ? (snap.data() || {}) : {};
+    if (meta.dailySyncDate === today) return;
+
+    showProgress('Actualizando datos diarios', 'Preparando actualización segura...', 8);
+    status('Espera un momento, actualizando los datos del día...');
+    setFirebaseStatus('Actualizando datos diarios. Esto puede tardar un momento.');
+
+    await doc.set({
+      sheetName: currentSheet,
+      dailySyncStartedAt: Date.now()
+    }, { merge: true });
+
+    setProgress(20, 'Guardando cambios pendientes en la base principal...');
+    await syncPendingFirebaseToSheets(false);
+    setProgress(55, 'Trayendo la información más reciente...');
+    await syncCurrentSheetToFirebase(false);
+
+    await doc.set({
+      sheetName: currentSheet,
+      dailySyncDate: today,
+      dailySyncFinishedAt: Date.now()
+    }, { merge: true });
+
+    setProgress(100, 'Listo. Cargando la base...');
+    status('Datos diarios actualizados. Cargando base...');
+    setFirebaseStatus('Datos del día actualizados correctamente.');
+    window.setTimeout(hideProgress, 900);
+  }
+
+  async function syncCurrentSheetToFirebase(showMessages = false) {
+    if (!firebaseDb) {
+      setFirebaseStatus('No se pudo actualizar la base de datos en este momento.');
+      return;
+    }
+
+    if (showMessages) {
+      showProgress('Actualizando datos', 'Trayendo información actualizada...', 10);
+      status(`Actualizando datos de "${currentSheet}"...`);
+    }
+    const fresh = await fetchAllRowsFromSheets(currentSheet, true);
+    allRowsCache.set(currentSheet, { ...fresh, source: 'firebase' });
+    if (showMessages) setProgress(85, 'Recalculando avisos de seguimiento...');
+    await computeAndRenderAlerts();
+    if (showMessages) {
+      setProgress(100, 'Datos actualizados correctamente.');
+      status(`Datos actualizados para "${currentSheet}".`);
+      window.setTimeout(hideProgress, 900);
+    }
+  }
+
+  /* =============================
+     7) Utilidades
      ============================= */
   function status(msg) { statusEl.textContent = msg; }
 
@@ -854,8 +1259,8 @@
     soon.sort(byWhen);
 
     renderAlertsUI(
-      urgent.slice(0,5).map(x=>x.row),
-      soon.slice(0,5).map(x=>x.row),
+      urgent.slice(0,8).map(x=>x.row),
+      soon.slice(0,4).map(x=>x.row),
       urgent.length,
       soon.length
     );
@@ -871,18 +1276,24 @@
     }
 
     const makeItem = (r) => {
+      const urgency = classifyUrgency(r);
       const name  = (String(r['Nombre']||'').trim()) || '(Sin nombre)';
       const prio  = (String(r['Prioridad']||'').trim()) || '';
       const canal = (String(r['Canal de comunicación'] || r['Canal'] || '').trim());
       const when  = minDate(parseYMD(r['Fecha para contactar']), parseYMD(r['Siguiente Contacto (calc)']));
-      const whenTxt = when ? formatYMD(when) : '—';
+      const whenTxt = urgency.reason || (when ? formatYMD(when) : 'Sin fecha');
       const id = String(r['ID']||'').trim();
+
+      const badge = prio ? prio : 'Pendiente';
 
       return `
         <div class="alert-item">
-          <strong>${esc(name)}</strong>
-          <span class="meta">· ${esc(prio || '—')}${canal?` · ${esc(canal)}`:''} · ${esc(whenTxt)}</span>
-          <button class="btn" data-openid="${escAttr(id)}">Abrir</button>
+          <div class="alert-person">
+            <strong>${esc(name)}</strong>
+            <span class="meta">${canal ? esc(canal) : 'Sin canal'} · ${esc(whenTxt)}</span>
+          </div>
+          <span class="mini-priority">${esc(badge)}</span>
+          <button class="btn alert-open" data-openid="${escAttr(id)}">Abrir</button>
         </div>
       `;
     };
@@ -890,11 +1301,13 @@
     alertsEl.innerHTML = `
       <div class="alert-card">
         <div class="alert-title">
-          <span>📞 Contactar clientes</span>
-          <span class="kebab">·</span>
+          <div>
+            <span class="alert-eyebrow">Seguimiento</span>
+            <h2>Contactos que necesitan atención</h2>
+          </div>
           <div class="pills">
-            <span class="pill urgent">Urgentes: ${uCount}</span>
-            <span class="pill soon">Agendados (≤3 días): ${sCount}</span>
+            <span class="pill urgent">${uCount.toLocaleString()} urgentes</span>
+            <span class="pill soon">${sCount.toLocaleString()} próximos</span>
           </div>
         </div>
         <div class="alert-list">
@@ -924,6 +1337,8 @@
     const f1   = parseYMD(String(row['Fecha para contactar'] ?? ''));
     const f2   = parseYMD(String(row['Siguiente Contacto (calc)'] ?? ''));
     const when = minDate(f1, f2);
+    const lastContact = getLastContactDate(row);
+    const enrolled = isEnrolled(row);
 
     const today = toYMD(new Date());
     const in3   = addDays(today, 3);
@@ -931,11 +1346,41 @@
     const dueOrPast = (d) => d && d <= today;
     const within3   = (d) => d && d > today && d <= in3;
 
-    if (prio === 'alta' && dueOrPast(when)) return { type:'urgent', when: formatIf(when), whenSort: when };
-    if (prio === 'alta' && !when)           return { type:'urgent', when: '', whenSort: today };
-    if (dueOrPast(when))                    return { type: when && when.getTime() === today.getTime() ? 'today' : 'urgent', when: formatIf(when), whenSort: when || today };
-    if (within3(when))                      return { type:'soon', when: formatIf(when), whenSort: when };
+    if (enrolled) return { type:'ok', when:'', whenSort: null, reason:'Matriculado' };
+    if (prio === 'alta' && dueOrPast(when)) return { type:'urgent', when: formatIf(when), whenSort: when, reason:'Contacto vencido' };
+    if (prio === 'alta' && !when)           return { type:'urgent', when: '', whenSort: today, reason:'Prioridad alta sin fecha' };
+    if (dueOrPast(when))                    return { type: when && when.getTime() === today.getTime() ? 'today' : 'urgent', when: formatIf(when), whenSort: when || today, reason:'Fecha de contacto vencida' };
+    if (lastContact) {
+      const days = daysBetween(lastContact, today);
+      if (days >= 30) return { type:'urgent', when: `${days} dias`, whenSort: addDays(today, -days), reason:'Sin contacto hace 1 mes o mas' };
+      if (days >= 15) return { type:'urgent', when: `${days} dias`, whenSort: addDays(today, -days), reason:'Sin contacto hace 15 dias' };
+      if (days >= 7)  return { type:'soon', when: `${days} dias`, whenSort: addDays(today, -days), reason:'Sin contacto hace 1 semana' };
+    } else {
+      return { type:'urgent', when:'', whenSort: today, reason:'Nunca contactado' };
+    }
+    if (within3(when))                      return { type:'soon', when: formatIf(when), whenSort: when, reason:'Contacto cercano' };
     return { type:'ok', when:'', whenSort: null };
+  }
+
+  function getLastContactDate(row) {
+    const candidates = [
+      'Último contacto', 'Último Contacto', 'Ultimo contacto', 'Ultimo Contacto',
+      'Fecha y hora de contacto', 'Fecha de contacto', 'Fecha Contacto',
+      'Fecha para contactar'
+    ];
+    for (const key of candidates) {
+      const parsed = parseYMD(String(row[key] ?? ''));
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  function isEnrolled(row) {
+    const blob = Object.keys(row || {})
+      .filter(k => /estado|matric|listado|status/i.test(k))
+      .map(k => String(row[k] ?? '').toLowerCase())
+      .join(' | ');
+    return /matriculad|inscrit|activo/.test(blob) && !/no\s+matriculad|no\s+inscrit|retirad/.test(blob);
   }
 
   async function getRowById(id) {
@@ -966,6 +1411,10 @@
     x.setDate(x.getDate()+n);
     return toYMD(x);
   }
+  function daysBetween(a,b){
+    if (!a || !b) return 0;
+    return Math.floor((toYMD(b) - toYMD(a)) / 86400000);
+  }
   function minDate(a,b){
     if (a && b) return a < b ? a : b;
     return a || b || null;
@@ -977,7 +1426,7 @@
     const iso = str.match(/^(\d{4})-(\d{2})-(\d{2})/);
     if (iso) return toYMD(new Date(Number(iso[1]), Number(iso[2])-1, Number(iso[3])));
 
-    const dmy = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})$/);
+    const dmy = str.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})(?:[ T]\d{1,2}:\d{2})?/);
     if (dmy){
       const dd = Number(dmy[1]);
       const mm = Number(dmy[2]) - 1;
