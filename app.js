@@ -90,7 +90,7 @@
     "Música": [
       "Piano","Guitarra","Canto","Violín","Batería","Cello","Bajo eléctrico","Ukelele",
       "Acordeón","Bandola","Iniciación Musical","Teoría","Composición música",
-      "Flauta Dulce","Saxofón","Requinto","Trombón","Trompeta","Percusión","Xilófono","Jazz"
+      "Flauta Dulce","Flauta Traversa","Saxofón","Requinto","Trombón","Trompeta","Percusión","Xilófono","Jazz"
     ],
     "Baile": [
       "Bailes Latinos","Danza clásica y contemporánea","Bailes Urbanos","Danzas folclóricas",
