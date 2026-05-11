@@ -346,6 +346,30 @@ body.modal-open{ overflow:hidden; }
 @media (max-width:720px){ .field{ grid-column:1 / -1; } }
 .field .label{ font-size:.75rem; color:var(--muted); margin-bottom:.25rem; }
 .field .value{ font-size:.95rem; color:var(--ink); word-break:break-word; }
+.field-tracking-date{
+  border-color:rgba(206,0,113,.35);
+  background:linear-gradient(180deg, rgba(206,0,113,.06), #fff 74%);
+  box-shadow:0 8px 18px rgba(206,0,113,.08);
+}
+.field-tracking-date .label{
+  display:inline-flex;
+  align-items:center;
+  gap:.35rem;
+  color:var(--magenta-brahms);
+  font-weight:800;
+}
+.field-tracking-date .label::before{
+  content:"";
+  width:.55rem;
+  height:.55rem;
+  border-radius:999px;
+  background:var(--magenta-brahms);
+  box-shadow:0 0 0 4px rgba(206,0,113,.12);
+}
+.field-tracking-date .in{
+  border-color:rgba(206,0,113,.42);
+  background:#fffafd;
+}
 
 .modal-footer{
   padding:.9rem 1.25rem 1.1rem; display:flex; justify-content:flex-end; gap:.5rem;

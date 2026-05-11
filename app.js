@@ -80,7 +80,7 @@
       "Sede","Activo","Sin agendar","Clase de  Prueba","FESICOL","Vacacionales",
       "Virtual","A hogar","No interesad@","Otros horarios","Distancia","Inscripción","No disponible"
     ],
-    Asesor: ["Alek Caballero","Catalina Medina","Camila Rodríguez"],
+    Asesor: ["Alek Caballero","Catalina Medina","Camila Rodríguez","Liceth Rincón"],
     "Canal de comunicación": ["Llamada","WhatsApp","Keybe","Instagram","Facebook","Wix","TikTok"],
     Prioridad: ["Alta","Media","Baja"]
   };
@@ -499,7 +499,7 @@
       'Arte I','Instrumento/Estilo/Técnica I',
       'Arte II','Instrumento/Estilo/Técnica II',
       'Arte III','Instrumento/Estilo/Técnica III',
-      'Modalidad','Curso/Plan','Ubicación','Fecha para contactar','Fecha y hora de contacto','Asesor','Comentario',
+      'Modalidad','Curso/Plan','Ubicación','Asesor','Canal de comunicación','Fecha y hora de contacto','Fecha para contactar','Comentario',
       '¿Tiene el instrumento?','Canal de comunicación','Prioridad'
     ];
     const headers = orderHeaders(currentHeaders, preferredOrder);
@@ -550,6 +550,7 @@
           const header = el.getAttribute('name');
           formValues[header] = el.value ?? '';
         });
+        validateTrackingDates(formValues);
 
         if (creatingNew) {
           const body = new URLSearchParams({
@@ -611,10 +612,13 @@
   function renderFieldHTML(h, raw, fullRow, isNew) {
     const id  = `f_${slug(h)}`;
     const headerName = String(h);
+    const labelText = getFieldLabel(headerName);
     const isLong = /comentario|ubicación|direccion|dirección/i.test(headerName);
 
     const arteIdx = ARTE_COLS.indexOf(headerName);
     const instIdx = INSTRUMENT_COLS.indexOf(headerName);
+
+    const fieldClass = isTrackingDateField(headerName) ? ' field-tracking-date' : '';
 
     let input = '';
 
@@ -647,9 +651,13 @@
 
     } else if (isDateHeader(headerName)) {
       const type = /hora/i.test(headerName) ? 'datetime-local' : 'date';
-      const iso = toInputDateValue(String(raw), type);
+      const autoRaw = isContactDateTimeField(headerName)
+        ? currentDateTimeLocal()
+        : String(raw);
+      const iso = toInputDateValue(autoRaw, type);
+      const minAttr = headerName === 'Fecha para contactar' ? ` min="${todayISODate()}"` : '';
       input = `<input id="${id}" name="${escAttr(h)}" class="in control" type="${type}"
-               value="${escAttr(iso)}" ${!isNew ? 'disabled' : ''} />`;
+               value="${escAttr(iso)}"${minAttr} ${!isNew ? 'disabled' : ''} />`;
 
     } else if (isLong) {
       input = `<textarea id="${id}" name="${escAttr(h)}" class="in control" rows="3"
@@ -666,10 +674,40 @@
       ? `<a class="btn btn-whatsapp" id="waBtn" target="_blank" rel="noopener" style="margin-top:.5rem; display:none;">💬 WhatsApp</a>`
       : '';
 
-    return `<div class="field">
-      <div class="label">${esc(h)}</div>
+    return `<div class="field${fieldClass}">
+      <div class="label">${esc(labelText)}</div>
       <div class="value">${input}${waHtml}</div>
     </div>`;
+  }
+
+  function getFieldLabel(headerName) {
+    if (headerName === 'Fecha para contactar') return 'Fecha para contactar nuevamente';
+    if (isContactDateTimeField(headerName)) return 'Fecha y hora en que se contactó';
+    return headerName;
+  }
+
+  function isTrackingDateField(headerName) {
+    return headerName === 'Fecha para contactar' || isContactDateTimeField(headerName);
+  }
+
+  function isContactDateTimeField(headerName) {
+    const normalized = String(headerName || '')
+      .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+      .trim()
+      .toLowerCase();
+    return normalized === 'fecha y hora de contacto';
+  }
+
+  function validateTrackingDates(formValues) {
+    const followUp = String(formValues['Fecha para contactar'] || '').trim();
+    if (!followUp) return;
+
+    const followUpDate = toInputDateValue(followUp, 'date').slice(0, 10);
+    if (/^\d{4}-\d{2}-\d{2}$/.test(followUpDate) && followUpDate < todayISODate()) {
+      const field = modalBody.querySelector('[name="Fecha para contactar"]');
+      field?.focus();
+      throw new Error('Hey, no: la fecha para contactar nuevamente está en el pasado. Debe ser hoy o una fecha futura.');
+    }
   }
 
   function closeModal() {
@@ -1155,6 +1193,24 @@
     if (/^\d{4}-\d{2}-\d{2}(T\d{2}:\d{2})?$/.test(s)) return s;
 
     return s;
+  }
+
+  function todayISODate() {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function currentDateTimeLocal() {
+    const d = new Date();
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mi = String(d.getMinutes()).padStart(2, '0');
+    return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
   }
 
   /* =============================
