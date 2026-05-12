@@ -131,6 +131,22 @@
 
   // OJO: displayedRows SIEMPRE debe ser exactamente lo que está renderizado
   let displayedRows  = []; // filas actualmente renderizadas (página o filtradas y/o ordenadas)
+  let alertFilter = 'all';
+  const TOP_RECOMMENDED_LIMIT = 10;
+  const NO_RESPONSE_COOLDOWN_DAYS = 3;
+  const CONTACTED_COOLDOWN_DAYS = 7;
+  const SKIPPED_COOLDOWN_DAYS = 1;
+  const EXCLUDED_AUDIT_DAYS = 180;
+  const CONFIRMED_EXCLUDED_AUDIT_DAYS = 365;
+  const TOP_RECOMMENDED_QUOTAS = {
+    new_recent: 2,
+    due_recent: 2,
+    high_no_date: 1,
+    reactivation_never_contacted: 2,
+    reactivation_old_client_or_warm: 1,
+    excluded_audit: 1,
+    general_rotation: 1
+  };
   btnGoogleLogin?.addEventListener('click', () => signInWithGoogle());
 
   /* =============================
@@ -515,6 +531,7 @@
     footer.innerHTML = `
       <span id="saveStatus" class="muted"></span>
       <div style="margin-left:auto; display:flex; gap:.5rem;">
+        <button id="btnContactNow" class="btn" type="button">Registrar contacto ahora</button>
         ${isNew ? '' : '<button id="btnEdit" class="btn">Editar</button>'}
         <button id="btnSave" class="btn">${isNew ? 'Crear' : 'Guardar'}</button>
         <button class="btn" data-close="1">Cerrar</button>
@@ -522,6 +539,7 @@
 
     const btnEdit    = document.getElementById('btnEdit');
     const btnSave    = document.getElementById('btnSave');
+    const btnContactNow = document.getElementById('btnContactNow');
     const saveStatus = document.getElementById('saveStatus');
 
     if (btnEdit) {
@@ -539,6 +557,19 @@
     } else {
       wireArteDependencies();
     }
+
+    btnContactNow?.addEventListener('click', () => {
+      const field = modalBody.querySelector('[data-contact-real="1"]');
+      if (!field) {
+        saveStatus.textContent = 'No hay campo de fecha de contacto real en esta hoja.';
+        return;
+      }
+      field.removeAttribute('readonly');
+      field.removeAttribute('disabled');
+      field.value = currentDateTimeLocal();
+      btnSave.disabled = false;
+      saveStatus.textContent = 'Contacto marcado para guardar';
+    });
 
     btnSave.addEventListener('click', async () => {
       try {
@@ -651,13 +682,11 @@
 
     } else if (isDateHeader(headerName)) {
       const type = /hora/i.test(headerName) ? 'datetime-local' : 'date';
-      const autoRaw = isContactDateTimeField(headerName)
-        ? currentDateTimeLocal()
-        : String(raw);
-      const iso = toInputDateValue(autoRaw, type);
+      const iso = toInputDateValue(String(raw), type);
       const minAttr = headerName === 'Fecha para contactar' ? ` min="${todayISODate()}"` : '';
+      const contactAttr = isContactDateTimeField(headerName) ? ' data-contact-real="1"' : '';
       input = `<input id="${id}" name="${escAttr(h)}" class="in control" type="${type}"
-               value="${escAttr(iso)}"${minAttr} ${!isNew ? 'disabled' : ''} />`;
+               value="${escAttr(iso)}"${minAttr}${contactAttr} ${!isNew ? 'disabled' : ''} />`;
 
     } else if (isLong) {
       input = `<textarea id="${id}" name="${escAttr(h)}" class="in control" rows="3"
@@ -703,6 +732,8 @@
     if (!followUp) return;
 
     const followUpDate = toInputDateValue(followUp, 'date').slice(0, 10);
+    const originalFollowUpDate = toInputDateValue(originalRow?.['Fecha para contactar'] || '', 'date').slice(0, 10);
+    if (!creatingNew && followUpDate && followUpDate === originalFollowUpDate) return;
     if (/^\d{4}-\d{2}-\d{2}$/.test(followUpDate) && followUpDate < todayISODate()) {
       const field = modalBody.querySelector('[name="Fecha para contactar"]');
       field?.focus();
@@ -1285,7 +1316,7 @@
   /* =============================
      7) Alertas / Urgencias (si existe #alerts en el HTML)
      ============================= */
-  async function computeAndRenderAlerts() {
+  async function computeAndRenderAlertsLegacy() {
     if (!alertsEl) return;
 
     let cache = allRowsCache.get(currentSheet);
@@ -1322,7 +1353,7 @@
     );
   }
 
-  function renderAlertsUI(urgentTop, soonTop, uCount, sCount){
+  function renderAlertsUILegacy(urgentTop, soonTop, uCount, sCount){
     if (!alertsEl) return;
 
     if (uCount === 0 && sCount === 0) {
@@ -1388,7 +1419,7 @@
     });
   }
 
-  function classifyUrgency(row){
+  function classifyUrgencyLegacy(row){
     const prio = (String(row['Prioridad'] ?? '')).trim().toLowerCase();
     const f1   = parseYMD(String(row['Fecha para contactar'] ?? ''));
     const f2   = parseYMD(String(row['Siguiente Contacto (calc)'] ?? ''));
@@ -1418,7 +1449,7 @@
     return { type:'ok', when:'', whenSort: null };
   }
 
-  function getLastContactDate(row) {
+  function getLastContactDateLegacy(row) {
     const candidates = [
       'Último contacto', 'Último Contacto', 'Ultimo contacto', 'Ultimo Contacto',
       'Fecha y hora de contacto', 'Fecha de contacto', 'Fecha Contacto',
@@ -1437,6 +1468,767 @@
       .map(k => String(row[k] ?? '').toLowerCase())
       .join(' | ');
     return /matriculad|inscrit|activo/.test(blob) && !/no\s+matriculad|no\s+inscrit|retirad/.test(blob);
+  }
+
+  async function computeAndRenderAlertsBucketsLegacy() {
+    if (!alertsEl) return;
+
+    let cache = allRowsCache.get(currentSheet);
+    if (!cache) {
+      cache = await loadAllRowsForSheet(currentSheet);
+      allRowsCache.set(currentSheet, cache);
+    }
+
+    const counts = emptyFollowUpCounts();
+    const items = [];
+
+    (cache.rows || []).forEach((row) => {
+      const urgency = classifyUrgency(row);
+      counts[urgency.bucket] = (counts[urgency.bucket] || 0) + 1;
+      if (shouldShowInAlerts(urgency)) items.push({ row, urgency });
+    });
+
+    items.sort(compareFollowUpItems);
+    console.info('[seguimiento] buckets', counts);
+    renderAlertsUI(items, counts);
+  }
+
+  function renderAlertsUI(items, counts){
+    if (!alertsEl) return;
+
+    const urgentRealCount = realUrgentCount(counts);
+    const soonCount = counts.soon || 0;
+    if (!items.length) {
+      alertsEl.classList.add('hidden');
+      alertsEl.innerHTML = '';
+      return;
+    }
+
+    const filterDefs = [
+      ['all', 'Todos', items.length],
+      ['real', 'Urgentes reales', urgentRealCount],
+      ['today', 'Hoy', counts.today || 0],
+      ['soon', 'Proximos', soonCount],
+      ['old', 'Antiguos por revisar', counts.old_review || 0]
+    ];
+    const filtered = filterAlertItems(items);
+    const maxItems = alertFilter === 'old' ? 12 : 18;
+
+    const makeItem = ({ row, urgency }) => {
+      const name = String(getField(row, ['Nombre']) || '').trim() || '(Sin nombre)';
+      const canal = getField(row, ['Canal de comunicacion', 'Canal de comunicaciÃ³n', 'Canal']) || 'Sin canal';
+      const asesor = getField(row, ['Asesor', 'Responsable']);
+      const id = String(getField(row, ['ID']) || '').trim();
+      const meta = [canal, asesor ? `Asesor: ${asesor}` : '', urgency.reason].filter(Boolean).join(' - ');
+      const dateTxt = followUpDateText(urgency);
+
+      return `
+        <div class="alert-item alert-${escAttr(urgency.bucket)}">
+          <div class="alert-person">
+            <strong>${esc(name)}</strong>
+            <span class="meta">${esc(meta)}</span>
+            ${dateTxt ? `<span class="meta">${esc(dateTxt)}</span>` : ''}
+          </div>
+          <span class="mini-priority">${esc(urgency.label || 'Pendiente')}</span>
+          <button class="btn alert-open" data-openid="${escAttr(id)}">Abrir</button>
+        </div>
+      `;
+    };
+
+    alertsEl.innerHTML = `
+      <div class="alert-card">
+        <div class="alert-title">
+          <div>
+            <span class="alert-eyebrow">Seguimiento</span>
+            <h2>Contactos que necesitan atenciÃ³n</h2>
+          </div>
+          <div class="pills">
+            <span class="pill urgent">${urgentRealCount.toLocaleString()} urgentes reales</span>
+            <span class="pill soon">${soonCount.toLocaleString()} proximos</span>
+            <span class="pill review">${(counts.old_review || 0).toLocaleString()} antiguos</span>
+          </div>
+        </div>
+        <div class="alert-summary">
+          ${summaryPill('Vencidos', counts.overdue)}
+          ${summaryPill('Hoy', counts.today)}
+          ${summaryPill('Alta sin fecha', counts.high_no_date)}
+          ${summaryPill('Nuevos', counts.fresh_uncontacted)}
+          ${summaryPill('Seguimiento', counts.followup)}
+          ${summaryPill('Antiguos', counts.old_review)}
+        </div>
+        <div class="alert-filters">
+          ${filterDefs.map(([key, label, count]) => `
+            <button type="button" class="alert-filter ${alertFilter === key ? 'active' : ''}" data-alert-filter="${escAttr(key)}">
+              ${esc(label)} <span>${Number(count || 0).toLocaleString()}</span>
+            </button>
+          `).join('')}
+        </div>
+        <div class="alert-list">
+          ${filtered.slice(0, maxItems).map(makeItem).join('')}
+        </div>
+      </div>
+    `;
+    alertsEl.classList.remove('hidden');
+
+    alertsEl.querySelectorAll('[data-alert-filter]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        alertFilter = btn.getAttribute('data-alert-filter') || 'all';
+        renderAlertsUI(items, counts);
+      });
+    });
+
+    alertsEl.querySelectorAll('[data-openid]').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const id = btn.getAttribute('data-openid') || '';
+        const row = await getRowById(id);
+        if (row) {
+          openModal(row);
+          setTimeout(()=>document.getElementById('btnEdit')?.click(), 0);
+        } else {
+          alert('No se encontrÃ³ la fila seleccionada.');
+        }
+      });
+    });
+  }
+
+  function classifyUrgency(row){
+    if (isExcludedFromFollowUp(row)) {
+      return { type:'excluded', level:'excluded', bucket:'excluded', label:'Excluido', reason:'Estado no requiere seguimiento', whenSort:null };
+    }
+
+    const priority = normalizeText(getField(row, ['Prioridad']));
+    const nextContact = getNextContactDate(row);
+    const lastContact = getLastContactDate(row);
+    const created = getCreatedDate(row);
+    const today = toYMD(new Date());
+    const in3 = addDays(today, 3);
+
+    if (nextContact) {
+      if (nextContact < today) return buildUrgency('urgent', 'urgent', 'overdue', 'Vencido', 'Fecha de seguimiento vencida', nextContact, 'Para contactar');
+      if (nextContact.getTime() === today.getTime()) return buildUrgency('today', 'today', 'today', 'Hoy', 'Seguimiento programado para hoy', nextContact, 'Para contactar');
+      if (nextContact <= in3) return buildUrgency('soon', 'soon', 'soon', 'Proximo', 'Seguimiento proximo', nextContact, 'Para contactar');
+      return buildUrgency('ok', 'ok', 'scheduled', 'Programado', 'Seguimiento programado a futuro', nextContact, 'Para contactar');
+    }
+
+    if (priority === 'alta') {
+      return { type:'urgent', level:'urgent', bucket:'high_no_date', label:'Alta sin fecha', reason:'Prioridad alta sin fecha de seguimiento', when:'', whenSort:today };
+    }
+
+    if (lastContact) {
+      const days = daysBetween(lastContact, today);
+      if (days >= 30) return buildUrgency('review', 'review', 'old_review', 'Revisar', 'Ultimo contacto hace 30+ dias', lastContact, 'Ultimo contacto', `${days} dias`);
+      if (days >= 15) return buildUrgency('urgent', 'urgent', 'followup', 'Seguimiento', 'Ultimo contacto hace 15+ dias', lastContact, 'Ultimo contacto', `${days} dias`);
+      if (days >= 7) return buildUrgency('soon', 'soon', 'soon', 'Proximo', 'Ultimo contacto hace 7+ dias', lastContact, 'Ultimo contacto', `${days} dias`);
+      return buildUrgency('ok', 'ok', 'ok', 'Al dia', 'Contacto reciente', lastContact, 'Ultimo contacto');
+    }
+
+    if (created) {
+      const age = daysBetween(created, today);
+      if (age <= 30) return buildUrgency('urgent', 'urgent', 'fresh_uncontacted', 'Nuevo sin contactar', 'Contacto reciente sin primer contacto', created, 'Creado', `${age} dias`);
+      return buildUrgency('review', 'review', 'old_review', 'Antiguo por revisar', 'Contacto antiguo sin primer contacto', created, 'Creado', `${age} dias`);
+    }
+
+    return { type:'review', level:'review', bucket:'old_review', label:'Sin fecha por revisar', reason:'Sin contacto registrado ni fecha de creacion', when:'', whenSort:null };
+  }
+
+  function buildUrgency(type, level, bucket, label, reason, date, dateLabel, whenText){
+    return {
+      type,
+      level,
+      bucket,
+      label,
+      reason,
+      when: whenText || formatIf(date),
+      whenSort: date || null,
+      relevantDate: date || null,
+      relevantDateLabel: dateLabel || ''
+    };
+  }
+
+  function emptyFollowUpCounts(){
+    return {
+      overdue:0, today:0, high_no_date:0, fresh_uncontacted:0, followup:0,
+      soon:0, old_review:0, scheduled:0, ok:0, excluded:0
+    };
+  }
+
+  function realUrgentCount(counts){
+    return ['overdue', 'today', 'high_no_date', 'fresh_uncontacted', 'followup']
+      .reduce((sum, key) => sum + Number(counts[key] || 0), 0);
+  }
+
+  function summaryPill(label, count){
+    return `<span>${esc(label)} <strong>${Number(count || 0).toLocaleString()}</strong></span>`;
+  }
+
+  function shouldShowInAlerts(urgency){
+    return ['overdue', 'today', 'high_no_date', 'fresh_uncontacted', 'followup', 'soon', 'old_review'].includes(urgency.bucket);
+  }
+
+  function filterAlertItems(items){
+    if (alertFilter === 'real') return items.filter(x => ['overdue', 'today', 'high_no_date', 'fresh_uncontacted', 'followup'].includes(x.urgency.bucket));
+    if (alertFilter === 'today') return items.filter(x => x.urgency.bucket === 'today');
+    if (alertFilter === 'soon') return items.filter(x => x.urgency.bucket === 'soon');
+    if (alertFilter === 'old') return items.filter(x => x.urgency.bucket === 'old_review');
+    return items;
+  }
+
+  function compareFollowUpItems(a, b){
+    const order = { overdue:1, today:2, high_no_date:3, fresh_uncontacted:4, followup:5, soon:6, old_review:7 };
+    const ao = order[a.urgency.bucket] || 99;
+    const bo = order[b.urgency.bucket] || 99;
+    if (ao !== bo) return ao - bo;
+
+    const ad = a.urgency.whenSort;
+    const bd = b.urgency.whenSort;
+    if (ad && bd && ad.getTime() !== bd.getTime()) {
+      if (a.urgency.bucket === 'fresh_uncontacted' || a.urgency.bucket === 'old_review') return bd - ad;
+      return ad - bd;
+    }
+    if (ad && !bd) return -1;
+    if (!ad && bd) return 1;
+    return String(getField(a.row, ['Nombre']) || '').localeCompare(String(getField(b.row, ['Nombre']) || ''), 'es', { sensitivity:'base' });
+  }
+
+  function followUpDateText(urgency){
+    if (!urgency?.relevantDate || !urgency?.relevantDateLabel) return '';
+    return `${urgency.relevantDateLabel}: ${formatYMD(urgency.relevantDate)}`;
+  }
+
+  function getLastContactDate(row) {
+    return firstDateFrom(row, [
+      'Ultimo contacto', 'Ultimo Contacto', 'Ãšltimo contacto', 'Ãšltimo Contacto',
+      'Fecha y hora de contacto', 'Fecha de contacto', 'Fecha Contacto'
+    ]);
+  }
+
+  function getNextContactDate(row) {
+    return firstDateFrom(row, ['Fecha para contactar', 'Siguiente Contacto (calc)']);
+  }
+
+  function getCreatedDate(row) {
+    return firstDateFrom(row, [
+      'Fecha de creacion', 'Fecha creacion', 'Creado', 'Fecha ingreso', 'Fecha de ingreso',
+      'Fecha registro', 'Fecha de registro', 'Fecha', 'Created At', 'created_at'
+    ]);
+  }
+
+  function firstDateFrom(row, names){
+    for (const name of names) {
+      const parsed = parseFlexibleDate(getField(row, [name]));
+      if (parsed) return parsed;
+    }
+    return null;
+  }
+
+  function getField(row, possibleNames){
+    if (!row) return '';
+    const direct = possibleNames.find(name => Object.prototype.hasOwnProperty.call(row, name));
+    if (direct) return row[direct];
+
+    const wanted = possibleNames.map(normalizeText);
+    const key = Object.keys(row).find(k => wanted.includes(normalizeText(k)));
+    if (key) return row[key];
+
+    for (const name of possibleNames) {
+      const found = findHeaderIncludes(row, normalizeText(name).split(/\s+/).filter(Boolean));
+      if (found) return row[found];
+    }
+    return '';
+  }
+
+  function findHeaderIncludes(row, keywords){
+    return Object.keys(row || {}).find((key) => {
+      const normalized = normalizeText(key);
+      return keywords.every(word => normalized.includes(word));
+    }) || '';
+  }
+
+  function normalizeText(value){
+    return String(value ?? '')
+      .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+      .toLowerCase()
+      .replace(/[^\p{L}\p{N}]+/gu, ' ')
+      .trim()
+      .replace(/\s+/g, ' ');
+  }
+
+  function parseFlexibleDate(value){
+    const s = String(value ?? '').trim();
+    if (!s) return null;
+    return parseYMD(s) || null;
+  }
+
+  function isExcludedFromFollowUp(row) {
+    const fields = [
+      'Estado', 'Status', 'Listado', 'Listado1', 'Matriculado', 'Observaciones', 'Notas',
+      'Resultado', 'Gestion', 'GestiÃ³n', 'Etapa', 'Canal', 'Canal de comunicacion',
+      'Canal de comunicaciÃ³n', 'Comentario'
+    ];
+    const blob = fields.map(name => normalizeText(getField(row, [name]))).filter(Boolean).join(' | ');
+    if (!blob) return false;
+
+    const excludedPatterns = [
+      /matriculad[oa]/, /inscrit[oa]/, /\bactiv[oa]\b/, /estudiante activo/, /ya inicio/,
+      /no interesad[oa]/, /no desea/, /no quiere/, /desistio/, /descartad[oa]/, /cerrad[oa]/, /perdid[oa]/,
+      /numero invalido/, /telefono invalido/, /datos invalidos/, /numero no existe/, /no responde nunca/, /bloquead[oa]/,
+      /duplicad[oa]/, /repetid[oa]/,
+      /retirad[oa]/, /no disponible/, /fuera de cobertura/, /\berror\b/, /\bprueba\b/
+    ];
+    const negativeActive = /no matriculad[oa]|no inscrit[oa]|no activ[oa]/.test(blob);
+    return excludedPatterns.some(rx => rx.test(blob)) && !negativeActive;
+  }
+
+  async function computeAndRenderAlerts() {
+    if (!alertsEl) return;
+
+    let cache = allRowsCache.get(currentSheet);
+    if (!cache) {
+      cache = await loadAllRowsForSheet(currentSheet);
+      allRowsCache.set(currentSheet, cache);
+    }
+
+    const result = buildTopRecommendedQueue(cache.rows || []);
+    console.info('[top10 seguimiento]', result.debug);
+    renderAlertsUI(result);
+  }
+
+  function buildTopRecommendedQueue(rows) {
+    const today = toYMD(new Date());
+    const groups = createRecommendedGroups();
+    const counts = createRecommendedCounts(rows.length);
+    let skippedByCooldown = 0;
+
+    rows.forEach((row, index) => {
+      const rec = classifyRecommendedFollowUp(row, index, today);
+      counts[rec.bucket] = (counts[rec.bucket] || 0) + 1;
+      if (rec.skippedByCooldown) {
+        skippedByCooldown += 1;
+        return;
+      }
+      if (groups[rec.bucket]) groups[rec.bucket].push({ row, rec, index });
+    });
+
+    Object.values(groups).forEach((items) => items.sort(compareRecommendedItems));
+
+    const selected = [];
+    const used = new Set();
+    const quotaTaken = {};
+    const takeFrom = (bucket, amount) => {
+      const source = groups[bucket] || [];
+      let taken = 0;
+      for (const item of source) {
+        if (selected.length >= TOP_RECOMMENDED_LIMIT || taken >= amount) break;
+        const key = stableRowKey(item.row, item.index);
+        if (used.has(key)) continue;
+        selected.push(item);
+        used.add(key);
+        quotaTaken[bucket] = (quotaTaken[bucket] || 0) + 1;
+        taken += 1;
+      }
+    };
+
+    takeFrom('new_recent', TOP_RECOMMENDED_QUOTAS.new_recent);
+    takeFrom('due_today', 1);
+    takeFrom('overdue_recent', Math.max(0, TOP_RECOMMENDED_QUOTAS.due_recent - (quotaTaken.due_today || 0)));
+    takeFrom('high_no_date', TOP_RECOMMENDED_QUOTAS.high_no_date);
+    takeFrom('reactivation_never_contacted', TOP_RECOMMENDED_QUOTAS.reactivation_never_contacted);
+    takeFrom('reactivation_old_client_or_warm', TOP_RECOMMENDED_QUOTAS.reactivation_old_client_or_warm);
+    takeFrom('excluded_audit', TOP_RECOMMENDED_QUOTAS.excluded_audit);
+    takeFrom('general_rotation', TOP_RECOMMENDED_QUOTAS.general_rotation);
+
+    const refillOrder = [
+      'due_today', 'overdue_recent', 'new_recent', 'reactivation_never_contacted',
+      'reactivation_old_client_or_warm', 'high_no_date', 'excluded_audit',
+      'general_rotation', 'upcoming'
+    ];
+    while (selected.length < TOP_RECOMMENDED_LIMIT) {
+      const before = selected.length;
+      refillOrder.forEach(bucket => takeFrom(bucket, 1));
+      if (selected.length === before) break;
+    }
+
+    const coverage = buildCoverageStats(rows, today);
+    return {
+      top: selected.slice(0, TOP_RECOMMENDED_LIMIT),
+      groups,
+      counts: { ...counts, skippedByCooldown },
+      coverage,
+      debug: {
+        ...counts,
+        skippedByCooldown,
+        top10: selected.length,
+        quotaTaken,
+        coverage
+      }
+    };
+  }
+
+  function renderAlertsUI(result){
+    if (!alertsEl) return;
+    const queue = result.top || [];
+    const current = queue[0] || null;
+    const counts = result.counts || {};
+    const coverage = result.coverage || {};
+
+    const makeItem = (item) => {
+      const { row, rec } = item;
+      const name = String(getField(row, ['Nombre']) || '').trim() || '(Sin nombre)';
+      const phone = String(getField(row, ['Celular/TelÃ©fono', 'Celular/Telefono', 'Telefono', 'TelÃ©fono']) || '').trim();
+      const canal = getField(row, ['Canal de comunicacion', 'Canal de comunicaciÃ³n', 'Canal']) || 'Sin canal';
+      const asesor = getField(row, ['Asesor', 'Responsable']);
+      const id = String(getField(row, ['ID']) || '').trim();
+      const dateTxt = recommendedDateText(rec);
+      const auditHint = rec.bucket === 'excluded_audit' ? '<span class="meta warning">Revision de excluido: verificar motivo antes de contactar.</span>' : '';
+
+      return `
+        <div class="alert-item alert-recommended alert-${escAttr(rec.bucket)}">
+          <div class="alert-person">
+            <strong>${esc(name)}</strong>
+            <span class="meta">${esc([canal, phone, asesor ? `Asesor: ${asesor}` : ''].filter(Boolean).join(' - '))}</span>
+            <span class="meta">${esc(rec.reason)}</span>
+            ${dateTxt ? `<span class="meta">${esc(dateTxt)}</span>` : ''}
+            ${auditHint}
+          </div>
+          <span class="mini-priority">${esc(rec.label)}</span>
+          <div class="alert-actions">
+            <button class="btn alert-open" data-openid="${escAttr(id)}">Abrir</button>
+            <button class="btn alert-action" data-action="contacted" data-openid="${escAttr(id)}">Contactado</button>
+            <button class="btn alert-action" data-action="no_response" data-openid="${escAttr(id)}">No respondio</button>
+            <button class="btn alert-action" data-action="reschedule" data-openid="${escAttr(id)}">Reprogramar</button>
+            <button class="btn alert-action" data-action="invalid_data" data-openid="${escAttr(id)}">Datos invalidos</button>
+            <button class="btn alert-action" data-action="confirm_excluded" data-openid="${escAttr(id)}">Excluir confirmado</button>
+            <button class="btn alert-action" data-action="enrolled" data-openid="${escAttr(id)}">Ya matriculado</button>
+            <button class="btn alert-action" data-action="recover" data-openid="${escAttr(id)}">Recuperar</button>
+            <button class="btn alert-action" data-action="skip" data-openid="${escAttr(id)}">Saltar</button>
+          </div>
+        </div>
+      `;
+    };
+
+    alertsEl.innerHTML = `
+      <div class="alert-card">
+        <div class="alert-title">
+          <div>
+            <span class="alert-eyebrow">Seguimiento guiado</span>
+            <h2>Siguiente contacto recomendado</h2>
+            <p class="alert-subtitle">El sistema rota contactos nuevos, vencidos, antiguos y casos por auditar para avanzar sobre toda la base.</p>
+          </div>
+          <div class="pills">
+            <span class="pill urgent">Contacto recomendado listo</span>
+            <span class="pill soon">Cola interna activa: ${queue.length.toLocaleString()}</span>
+            <span class="pill soon">${Number(counts.new_recent || 0).toLocaleString()} nuevos disponibles</span>
+            <span class="pill review">${Number((counts.reactivation_never_contacted || 0) + (counts.reactivation_old_client_or_warm || 0)).toLocaleString()} reactivacion</span>
+          </div>
+        </div>
+        <div class="alert-summary">
+          ${summaryPill('Vencidos recientes', counts.overdue_recent)}
+          ${summaryPill('Hoy', counts.due_today)}
+          ${summaryPill('Alta sin fecha', counts.high_no_date)}
+          ${summaryPill('Excluidos por auditar', counts.excluded_audit)}
+          ${summaryPill('Rotacion general', counts.general_rotation)}
+          ${summaryPill('Pendientes elegibles', coverage.eligible)}
+          ${summaryPill('Revisados 7 dias', coverage.reviewed7)}
+          ${summaryPill('Revisados 30 dias', coverage.reviewed30)}
+        </div>
+        ${current ? `
+          <div class="alert-list alert-list-current">
+            ${makeItem(current)}
+          </div>
+        ` : `
+          <div class="alert-empty">No hay un contacto recomendado disponible en este momento.</div>
+        `}
+      </div>
+    `;
+    alertsEl.classList.remove('hidden');
+
+    alertsEl.querySelectorAll('[data-openid].alert-open').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const row = await getRowById(btn.getAttribute('data-openid') || '');
+        if (row) {
+          openModal(row);
+          setTimeout(()=>document.getElementById('btnEdit')?.click(), 0);
+        } else {
+          alert('No se encontro la fila seleccionada.');
+        }
+      });
+    });
+
+    alertsEl.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => handleRecommendedAction(btn));
+    });
+  }
+
+  function createRecommendedGroups(){
+    return {
+      new_recent: [], due_today: [], overdue_recent: [], high_no_date: [],
+      reactivation_never_contacted: [], reactivation_old_client_or_warm: [],
+      excluded_audit: [], general_rotation: [], upcoming: [], scheduled_future: [], ok: [], excluded: []
+    };
+  }
+
+  function createRecommendedCounts(totalBase){
+    return {
+      totalBase, top10: 0, new_recent: 0, due_today: 0, overdue_recent: 0,
+      high_no_date: 0, reactivation_never_contacted: 0,
+      reactivation_old_client_or_warm: 0, excluded_audit: 0, general_rotation: 0,
+      upcoming: 0, scheduled_future: 0, ok: 0, excluded: 0, skippedByCooldown: 0
+    };
+  }
+
+  function classifyRecommendedFollowUp(row, index, today){
+    if (isActiveOrEnrolled(row)) {
+      return { rowIndex:index, attempts:getAttemptCount(row), rotation:stableDailyRotation(row, index, today), lastManaged:getLastManagedDate(row), relevantDate:null, relevantDateLabel:'', skippedByCooldown:false, bucket:'ok', label:'Matriculado', reason:'Matriculado o activo: fuera de seguimiento' };
+    }
+
+    const excluded = isExcludedFromFollowUp(row);
+    const auditDue = isExcludedAuditDue(row, today);
+    const nextContact = getNextContactDate(row);
+    const lastContact = getLastContactDate(row);
+    const created = getCreatedDate(row);
+    const lastManaged = getLastManagedDate(row);
+    const attempts = getAttemptCount(row);
+    const priority = normalizeText(getField(row, ['Prioridad']));
+    const cooldown = getCooldownInfo(row, today);
+    const rotation = stableDailyRotation(row, index, today);
+
+    const base = { rowIndex:index, attempts, rotation, lastManaged, relevantDate:null, relevantDateLabel:'', skippedByCooldown:false };
+
+    if (excluded) {
+      if (!auditDue) return { ...base, bucket:'excluded', label:'Excluido', reason:'Excluido confirmado o en cooldown de auditoria' };
+      if (cooldown.active) return { ...base, bucket:'excluded_audit', label:'Auditoria excluido', reason:`Revisar exclusion despues de cooldown (${cooldown.reason})`, skippedByCooldown:true };
+      return { ...base, bucket:'excluded_audit', label:'Revision de excluido', reason:'Auditar si la exclusion sigue vigente', relevantDate:getNextAuditDate(row), relevantDateLabel:'Proxima auditoria' };
+    }
+
+    if (cooldown.active) return { ...base, bucket:'ok', label:'En cooldown', reason:cooldown.reason, skippedByCooldown:true };
+
+    if (nextContact) {
+      const daysDue = daysBetween(nextContact, today);
+      if (nextContact.getTime() === today.getTime()) return { ...base, bucket:'due_today', label:'Hoy', reason:'Seguimiento programado para hoy', relevantDate:nextContact, relevantDateLabel:'Para contactar' };
+      if (nextContact < today && daysDue <= 30) return { ...base, bucket:'overdue_recent', label:'Vencido reciente', reason:'Fecha de seguimiento vencida hace maximo 30 dias', relevantDate:nextContact, relevantDateLabel:'Para contactar' };
+      if (nextContact < today && daysDue > 30) return { ...base, bucket:'reactivation_old_client_or_warm', label:'Reactivacion', reason:'Fecha vencida antigua: reactivar sin tratar como urgente', relevantDate:nextContact, relevantDateLabel:'Para contactar' };
+      if (nextContact <= addDays(today, 7)) return { ...base, bucket:'upcoming', label:'Proximo', reason:'Seguimiento programado en los proximos 7 dias', relevantDate:nextContact, relevantDateLabel:'Para contactar' };
+      return { ...base, bucket:'scheduled_future', label:'Programado', reason:'Fecha futura mayor a 7 dias', relevantDate:nextContact, relevantDateLabel:'Para contactar' };
+    }
+
+    if (priority === 'alta') return { ...base, bucket:'high_no_date', label:'Alta sin fecha', reason:'Prioridad alta sin fecha de seguimiento' };
+
+    if (!lastContact) {
+      if (created && daysBetween(created, today) <= 30) return { ...base, bucket:'new_recent', label:'Nuevo sin contactar', reason:'Contacto reciente sin primer contacto', relevantDate:created, relevantDateLabel:'Creado' };
+      return { ...base, bucket:'reactivation_never_contacted', label:'Reactivacion sin contacto', reason:created ? 'Contacto antiguo nunca contactado' : 'Sin contacto registrado ni fecha de creacion', relevantDate:created, relevantDateLabel:created ? 'Creado' : '' };
+    }
+
+    const daysLast = daysBetween(lastContact, today);
+    if (daysLast > 30 || hasWarmSignal(row)) return { ...base, bucket:'reactivation_old_client_or_warm', label:'Reactivacion', reason:'Contacto antiguo o con interes previo para reciclar', relevantDate:lastContact, relevantDateLabel:'Ultimo contacto' };
+    if (daysLast >= 7) return { ...base, bucket:'general_rotation', label:'Rotacion general', reason:'Contacto elegible para cobertura progresiva', relevantDate:lastContact, relevantDateLabel:'Ultimo contacto' };
+    return { ...base, bucket:'ok', label:'Al dia', reason:'Gestionado recientemente', relevantDate:lastContact, relevantDateLabel:'Ultimo contacto' };
+  }
+
+  function compareRecommendedItems(a, b){
+    const am = a.rec.lastManaged ? a.rec.lastManaged.getTime() : 0;
+    const bm = b.rec.lastManaged ? b.rec.lastManaged.getTime() : 0;
+    if (am !== bm) return am - bm;
+    if (a.rec.attempts !== b.rec.attempts) return a.rec.attempts - b.rec.attempts;
+    const ad = a.rec.relevantDate;
+    const bd = b.rec.relevantDate;
+    if (ad && bd && ad.getTime() !== bd.getTime()) {
+      if (a.rec.bucket === 'new_recent') return bd - ad;
+      return ad - bd;
+    }
+    if (ad && !bd) return -1;
+    if (!ad && bd) return 1;
+    return a.rec.rotation - b.rec.rotation;
+  }
+
+  function stableDailyRotation(row, index, date){
+    const day = formatYMD(date);
+    const raw = `${day}|${stableRowKey(row, index)}`;
+    let hash = 2166136261;
+    for (let i = 0; i < raw.length; i += 1) {
+      hash ^= raw.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0) / 4294967295;
+  }
+
+  function stableRowKey(row, index){
+    return [
+      getField(row, ['ID']),
+      getField(row, ['Nombre']),
+      getField(row, ['Celular/TelÃ©fono', 'Celular/Telefono', 'Telefono', 'TelÃ©fono']),
+      getField(row, ['Correo Electronico', 'Correo ElectrÃ³nico', 'Email']),
+      index
+    ].map(v => normalizeText(v)).join('|');
+  }
+
+  function recommendedDateText(rec){
+    if (!rec?.relevantDate || !rec?.relevantDateLabel) return '';
+    return `${rec.relevantDateLabel}: ${formatYMD(rec.relevantDate)}`;
+  }
+
+  function getLastManagedDate(row){
+    return firstDateFrom(row, ['Fecha ultima gestion', 'Fecha Ãºltima gestiÃ³n', 'Fecha ultima revision', 'Fecha Ãºltima revisiÃ³n', 'Ultima gestion', 'Ãšltima gestiÃ³n']);
+  }
+
+  function getNextAuditDate(row){
+    return firstDateFrom(row, ['Fecha proxima auditoria', 'Fecha prÃ³xima auditorÃ­a', 'Proxima auditoria', 'PrÃ³xima auditorÃ­a']);
+  }
+
+  function getAttemptCount(row){
+    const raw = getField(row, ['Intentos', 'Numero de intentos', 'NÃºmero de intentos']);
+    const n = Number(String(raw || '').replace(/[^\d]/g, ''));
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  function getCooldownInfo(row, today){
+    const result = normalizeText(getField(row, ['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado']));
+    const state = normalizeText(getField(row, ['Estado de seguimiento', 'Estado', 'Status']));
+    const last = getLastManagedDate(row);
+    if (!last) return { active:false, reason:'' };
+    const days = daysBetween(last, today);
+    if (/no respondio|no respuesta/.test(result) && days < NO_RESPONSE_COOLDOWN_DAYS) return { active:true, reason:'No respondio recientemente' };
+    if (/contactado/.test(result) && days < CONTACTED_COOLDOWN_DAYS) return { active:true, reason:'Contactado recientemente' };
+    if (/saltado/.test(result) && days < SKIPPED_COOLDOWN_DAYS) return { active:true, reason:'Saltado recientemente' };
+    if (/datos invalidos/.test(result) && days < EXCLUDED_AUDIT_DAYS) return { active:true, reason:'Datos invalidos en auditoria' };
+    if (/excluido confirmado/.test(state) && days < CONFIRMED_EXCLUDED_AUDIT_DAYS) return { active:true, reason:'Exclusion confirmada reciente' };
+    return { active:false, reason:'' };
+  }
+
+  function isExcludedAuditDue(row, today){
+    const nextAudit = getNextAuditDate(row);
+    if (nextAudit) return nextAudit <= today;
+    const state = normalizeText(getField(row, ['Estado de seguimiento', 'Estado', 'Status']));
+    const last = getLastManagedDate(row);
+    if (/excluido confirmado/.test(state) && last) return daysBetween(last, today) >= CONFIRMED_EXCLUDED_AUDIT_DAYS;
+    return true;
+  }
+
+  function isActiveOrEnrolled(row){
+    const fields = ['Estado', 'Status', 'Listado', 'Listado1', 'Matriculado', 'Resultado', 'Gestion', 'GestiÃ³n', 'Etapa'];
+    const blob = fields.map(name => normalizeText(getField(row, [name]))).filter(Boolean).join(' | ');
+    if (/no matriculad[oa]|no inscrit[oa]|retirad[oa]/.test(blob)) return false;
+    return /matriculad[oa]|inscrit[oa]|\bactiv[oa]\b|estudiante activo|ya inicio/.test(blob);
+  }
+
+  function hasWarmSignal(row){
+    const blob = ['Comentario', 'Observaciones', 'Notas', 'Resultado', 'Gestion', 'GestiÃ³n', 'Etapa', 'Clase', 'Curso/Plan']
+      .map(name => normalizeText(getField(row, [name]))).join(' | ');
+    return /clase|prueba|interes|interesad|cotiz|pregunto|agenda|agendo|volvio|retomar/.test(blob);
+  }
+
+  function buildCoverageStats(rows, today){
+    const stats = { reviewed7:0, reviewed30:0, unreviewed:0, eligible:0, confirmedExcluded:0 };
+    rows.forEach((row, index) => {
+      const state = normalizeText(getField(row, ['Estado de seguimiento', 'Estado', 'Status']));
+      if (/excluido confirmado/.test(state)) stats.confirmedExcluded += 1;
+      const rec = classifyRecommendedFollowUp(row, index, today);
+      if (!['excluded', 'scheduled_future', 'ok'].includes(rec.bucket)) stats.eligible += 1;
+      const last = getLastManagedDate(row);
+      if (!last) stats.unreviewed += 1;
+      else {
+        const days = daysBetween(last, today);
+        if (days <= 7) stats.reviewed7 += 1;
+        if (days <= 30) stats.reviewed30 += 1;
+      }
+    });
+    return stats;
+  }
+
+  async function handleRecommendedAction(btn){
+    const id = btn.getAttribute('data-openid') || '';
+    const action = btn.getAttribute('data-action') || '';
+    const row = await getRowById(id);
+    if (!row) {
+      alert('No se encontro la fila seleccionada.');
+      return;
+    }
+
+    const extra = {};
+    if (action === 'reschedule') {
+      const value = prompt('Fecha para contactar (AAAA-MM-DD):', formatYMD(addDays(toYMD(new Date()), 3)));
+      if (!value) return;
+      extra.followUpDate = value;
+    }
+    if (action === 'confirm_excluded') {
+      const reason = prompt('Motivo de exclusion:', 'No requiere seguimiento');
+      if (reason === null) return;
+      extra.reason = reason;
+    }
+    if (action === 'skip') {
+      const reason = prompt('Motivo para saltar este contacto:', 'No es buen momento');
+      if (reason === null) return;
+      extra.reason = reason;
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Guardando...';
+    try {
+      const updated = buildManagedRow(row, action, extra);
+      await saveRowToFirebase(currentSheet, updated, true);
+      allRowsCache.delete(currentSheet);
+      await loadPage();
+      await computeAndRenderAlerts();
+    } catch (err) {
+      console.error(err);
+      alert(`No se pudo guardar la gestion: ${err?.message || err}`);
+      btn.disabled = false;
+    }
+  }
+
+  function buildManagedRow(row, action, extra = {}){
+    const out = { ...row };
+    const now = currentDateTimeLocal();
+    const today = toYMD(new Date());
+    const set = (names, value) => setExistingField(out, names, value);
+    const attempts = getAttemptCount(row) + 1;
+
+    set(['Fecha ultima gestion', 'Fecha Ãºltima gestiÃ³n', 'Ultima gestion', 'Ãšltima gestiÃ³n'], now);
+    set(['Asesor ultima gestion', 'Asesor Ãºltima gestiÃ³n'], authUser?.email || '');
+    set(['Intentos', 'Numero de intentos', 'NÃºmero de intentos'], String(attempts));
+
+    if (action === 'contacted') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'Contactado');
+      set(['Fecha y hora de contacto'], now);
+    } else if (action === 'no_response') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'No respondio');
+      set(['Fecha para contactar'], formatYMD(addDays(today, NO_RESPONSE_COOLDOWN_DAYS)));
+    } else if (action === 'reschedule') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'Reprogramado');
+      set(['Fecha para contactar'], extra.followUpDate || formatYMD(addDays(today, NO_RESPONSE_COOLDOWN_DAYS)));
+    } else if (action === 'invalid_data') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'Datos invalidos');
+      set(['Estado de seguimiento', 'Estado', 'Status'], 'Datos invalidos');
+      set(['Fecha proxima auditoria', 'Fecha prÃ³xima auditorÃ­a'], formatYMD(addDays(today, EXCLUDED_AUDIT_DAYS)));
+    } else if (action === 'confirm_excluded') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'Exclusion confirmada');
+      set(['Estado de seguimiento', 'Estado', 'Status'], 'Excluido confirmado');
+      set(['Motivo de exclusion', 'Motivo de exclusiÃ³n'], extra.reason || 'No requiere seguimiento');
+      set(['Fecha proxima auditoria', 'Fecha prÃ³xima auditorÃ­a'], formatYMD(addDays(today, CONFIRMED_EXCLUDED_AUDIT_DAYS)));
+    } else if (action === 'enrolled') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'Ya matriculado');
+      set(['Estado de seguimiento', 'Estado', 'Status', 'Matriculado'], 'Matriculado / Activo');
+    } else if (action === 'recover') {
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], 'Recuperado para seguimiento');
+      set(['Estado de seguimiento', 'Estado', 'Status'], 'Recuperado');
+      set(['Fecha para contactar'], formatYMD(today));
+    } else if (action === 'skip') {
+      set(['Fecha ultima revision', 'Fecha Ãºltima revisiÃ³n'], now);
+      set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], `Saltado: ${extra.reason || 'Sin motivo'}`);
+    }
+
+    return out;
+  }
+
+  function setExistingField(row, names, value){
+    const key = findExistingKey(row, names);
+    if (key) row[key] = value;
+  }
+
+  function findExistingKey(row, names){
+    const direct = names.find(name => Object.prototype.hasOwnProperty.call(row, name));
+    if (direct) return direct;
+    const wanted = names.map(normalizeText);
+    return Object.keys(row || {}).find(k => wanted.includes(normalizeText(k))) || '';
   }
 
   async function getRowById(id) {

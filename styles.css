@@ -163,12 +163,65 @@ body {
 }
 .pill.urgent{ color:var(--magenta-brahms); border-color: rgba(206,0,113,.35); background:rgba(206,0,113,.06); }
 .pill.soon{ color:var(--azul-mozart); border-color: rgba(12,65,196,.35); background:rgba(12,65,196,.06); }
+.pill.review{ color:#6b4b00; border-color:rgba(162,117,0,.3); background:rgba(162,117,0,.07); }
+.alert-summary,
+.alert-filters{
+  display:flex;
+  align-items:center;
+  gap:.45rem;
+  flex-wrap:wrap;
+}
+.alert-summary span{
+  display:inline-flex;
+  align-items:center;
+  gap:.25rem;
+  padding:.22rem .48rem;
+  border:1px solid #e5e7eb;
+  border-radius:999px;
+  color:var(--muted);
+  background:#fbfcff;
+  font-size:.78rem;
+}
+.alert-summary strong{ color:var(--ink); }
+.alert-filter{
+  border:1px solid #d8deec;
+  background:#fff;
+  color:#374151;
+  border-radius:999px;
+  padding:.35rem .62rem;
+  font:inherit;
+  font-size:.82rem;
+  font-weight:750;
+  cursor:pointer;
+}
+.alert-filter span{ color:var(--muted); font-weight:700; margin-left:.25rem; }
+.alert-filter.active{
+  border-color:rgba(12,65,196,.45);
+  background:rgba(12,65,196,.08);
+  color:var(--azul-mozart);
+}
 .kebab{ color:var(--muted); }
 
 .alert-list{
   display:grid;
   grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));
   gap:.55rem;
+}
+.alert-list-current{
+  grid-template-columns:1fr;
+}
+.alert-subtitle{
+  margin:.28rem 0 0;
+  color:var(--muted);
+  font-size:.86rem;
+  max-width:680px;
+}
+.alert-empty{
+  padding:.85rem 1rem;
+  border:1px dashed #d7deeb;
+  border-radius:10px;
+  color:var(--muted);
+  background:#fbfcff;
 }
 .alert-item{
   min-height:64px;
@@ -181,6 +234,10 @@ body {
   align-items:center;
   gap:.55rem;
   font-size:.9rem;
+}
+.alert-recommended{
+  grid-template-columns:minmax(0, 1fr) auto;
+  align-items:start;
 }
 .alert-person{
   display:grid;
@@ -198,6 +255,22 @@ body {
   overflow:hidden;
   text-overflow:ellipsis;
   white-space:nowrap;
+}
+.alert-item .meta.warning{
+  color:#92400e;
+  white-space:normal;
+}
+.alert-actions{
+  grid-column:1 / -1;
+  display:flex;
+  gap:.35rem;
+  flex-wrap:wrap;
+  justify-content:flex-start;
+}
+.alert-actions .btn{
+  padding:.34rem .5rem;
+  font-size:.78rem;
+  border-color:#d7deeb;
 }
 .mini-priority{
   border-radius:999px;
