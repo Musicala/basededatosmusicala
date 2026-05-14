@@ -133,7 +133,7 @@
   let displayedRows  = []; // filas actualmente renderizadas (página o filtradas y/o ordenadas)
   let alertFilter = 'all';
   const TOP_RECOMMENDED_LIMIT = 10;
-  const NO_RESPONSE_COOLDOWN_DAYS = 3;
+  const NO_RESPONSE_COOLDOWN_DAYS = 2;
   const CONTACTED_COOLDOWN_DAYS = 7;
   const SKIPPED_COOLDOWN_DAYS = 1;
   const EXCLUDED_AUDIT_DAYS = 180;
@@ -935,6 +935,34 @@
     return id ? slug(id) : `fila-${index + 1}`;
   }
 
+  function attachFirebaseMeta(row, payload, docId) {
+    const out = { ...(payload?.data || row || {}) };
+    Object.defineProperty(out, '__tracking', {
+      value: payload?.tracking || null,
+      enumerable: false,
+      configurable: true
+    });
+    Object.defineProperty(out, '__source', {
+      value: payload?.source || null,
+      enumerable: false,
+      configurable: true
+    });
+    Object.defineProperty(out, '__rowDocId', {
+      value: docId || rowDocId(out, 0),
+      enumerable: false,
+      configurable: true
+    });
+    return out;
+  }
+
+  function getTracking(row) {
+    return row?.__tracking && typeof row.__tracking === 'object' ? row.__tracking : {};
+  }
+
+  function cloneTracking(tracking) {
+    return tracking && typeof tracking === 'object' ? { ...tracking } : {};
+  }
+
   async function loadSheetFromFirebase(sheetName) {
     if (!firebaseDb) return null;
 
@@ -947,7 +975,7 @@
       if (rowSnap.empty) return null;
 
       const meta = metaSnap.data() || {};
-      const rows = rowSnap.docs.map(d => d.data().data || d.data());
+      const rows = rowSnap.docs.map(d => attachFirebaseMeta(null, d.data() || {}, d.id));
       const headers = Array.isArray(meta.headers) && meta.headers.length
         ? meta.headers
         : Array.from(rows.reduce((set, row) => {
@@ -982,12 +1010,14 @@
     for (let start = 0; start < rows.length; start += batchSize) {
       const batch = firebaseDb.batch();
       rows.slice(start, start + batchSize).forEach((row, i) => {
+        const now = Date.now();
         batch.set(doc.collection('rows').doc(rowDocId(row, start + i)), {
           data: row,
-          updatedAt: Date.now(),
-          pendingSheetSync: false,
-          pendingReason: '',
-          syncedAt: Date.now()
+          source: {
+            sheetSlug: slug(sheetName),
+            updatedFromSheetAt: now
+          },
+          updatedAt: now
         }, { merge: true });
       });
       await batch.commit();
@@ -1120,7 +1150,8 @@
       status(`Actualizando datos de "${currentSheet}"...`);
     }
     const fresh = await fetchAllRowsFromSheets(currentSheet, true);
-    allRowsCache.set(currentSheet, { ...fresh, source: 'firebase' });
+    const firebaseFresh = await loadSheetFromFirebase(currentSheet);
+    allRowsCache.set(currentSheet, firebaseFresh || { ...fresh, source: 'firebase' });
     if (showMessages) setProgress(85, 'Recalculando avisos de seguimiento...');
     await computeAndRenderAlerts();
     if (showMessages) {
@@ -1345,7 +1376,7 @@
     urgent.sort(byWhen);
     soon.sort(byWhen);
 
-    renderAlertsUI(
+    renderAlertsUILegacy(
       urgent.slice(0,8).map(x=>x.row),
       soon.slice(0,4).map(x=>x.row),
       urgent.length,
@@ -1490,10 +1521,60 @@
 
     items.sort(compareFollowUpItems);
     console.info('[seguimiento] buckets', counts);
-    renderAlertsUI(items, counts);
+    renderAlertsUIBucketsLegacy(items, counts);
   }
 
-  function renderAlertsUI(items, counts){
+  async function saveTrackingToFirebase(sheetName, row, action, extra = {}) {
+    if (!firebaseDb) throw new Error('No se pudo guardar el seguimiento en Firebase.');
+    const doc = sheetDoc(sheetName);
+    const id = rowDocId(row, 0);
+    if (!id) throw new Error('El registro no tiene ID.');
+
+    const rowRef = doc.collection('rows').doc(id);
+    const previousTracking = cloneTracking(getTracking(row));
+    const tracking = buildTrackingUpdate(row, action, extra);
+    const updatedRow = attachFirebaseMeta(row, {
+      data: { ...row },
+      tracking,
+      source: {
+        ...(row.__source || {}),
+        sheetSlug: slug(sheetName)
+      }
+    }, id);
+    const now = Date.now();
+
+    await rowRef.set({
+      data: { ...row },
+      tracking,
+      source: {
+        ...(row.__source || {}),
+        sheetSlug: slug(sheetName)
+      },
+      updatedAt: now
+    }, { merge: true });
+
+    await rowRef.collection('seguimientos').add({
+      action: tracking.lastAction || action,
+      resultLabel: tracking.resultLabel || action,
+      advisorEmail: tracking.advisorEmail || '',
+      createdAt: now,
+      previousTracking,
+      newTracking: tracking,
+      contactSnapshot: buildContactSnapshot(row),
+      notes: extra.notes || null,
+      reason: extra.reason || null,
+      nextContactAt: tracking.nextContactAt || null
+    });
+
+    await doc.set({
+      sheetName,
+      updatedAt: now
+    }, { merge: true });
+
+    return updatedRow;
+  }
+
+  function renderAlertsUIBucketsLegacy(items, counts){
     if (!alertsEl) return;
 
     const urgentRealCount = realUrgentCount(counts);
@@ -1573,7 +1654,7 @@
     alertsEl.querySelectorAll('[data-alert-filter]').forEach(btn => {
       btn.addEventListener('click', () => {
         alertFilter = btn.getAttribute('data-alert-filter') || 'all';
-        renderAlertsUI(items, counts);
+        renderAlertsUIBucketsLegacy(items, counts);
       });
     });
 
@@ -1696,6 +1777,9 @@
   }
 
   function getLastContactDate(row) {
+    const tracking = getTracking(row);
+    const trackedDate = parseFlexibleDate(tracking.lastContactAt);
+    if (trackedDate) return trackedDate;
     return firstDateFrom(row, [
       'Ultimo contacto', 'Ultimo Contacto', 'Ãšltimo contacto', 'Ãšltimo Contacto',
       'Fecha y hora de contacto', 'Fecha de contacto', 'Fecha Contacto'
@@ -1703,6 +1787,9 @@
   }
 
   function getNextContactDate(row) {
+    const tracking = getTracking(row);
+    const trackedDate = parseFlexibleDate(tracking.nextContactAt);
+    if (trackedDate) return trackedDate;
     return firstDateFrom(row, ['Fecha para contactar', 'Siguiente Contacto (calc)']);
   }
 
@@ -1754,6 +1841,8 @@
   }
 
   function parseFlexibleDate(value){
+    if (typeof value === 'number' && Number.isFinite(value)) return toYMD(new Date(value));
+    if (value && typeof value.toDate === 'function') return toYMD(value.toDate());
     const s = String(value ?? '').trim();
     if (!s) return null;
     return parseYMD(s) || null;
@@ -1977,6 +2066,50 @@
   }
 
   function classifyRecommendedFollowUp(row, index, today){
+    const tracking = getTracking(row);
+    const trackedStatus = normalizeText(tracking.status);
+    const trackedLastManaged = parseFlexibleDate(tracking.lastManagedAt || tracking.updatedAt);
+    const trackedNextContact = parseFlexibleDate(tracking.nextContactAt);
+    const trackedAttempts = Number(tracking.attempts || 0);
+    const trackedBase = {
+      rowIndex:index,
+      attempts:Number.isFinite(trackedAttempts) ? trackedAttempts : 0,
+      rotation:stableDailyRotation(row, index, today),
+      lastManaged:trackedLastManaged,
+      relevantDate:null,
+      relevantDateLabel:'',
+      skippedByCooldown:false
+    };
+
+    if (trackedStatus) {
+      if (['enrolled', 'invalid data', 'invalid_data', 'excluded'].includes(trackedStatus)) {
+        return { ...trackedBase, bucket:'excluded', label:tracking.resultLabel || 'Fuera de cola', reason:'Seguimiento Firebase: fuera de la cola normal' };
+      }
+      if (trackedStatus === 'contacted') {
+        const days = trackedLastManaged ? daysBetween(trackedLastManaged, today) : 0;
+        if (!trackedLastManaged || days < CONTACTED_COOLDOWN_DAYS) {
+          return { ...trackedBase, bucket:'ok', label:'Contactado', reason:'Contactado recientemente en Firebase', skippedByCooldown:true };
+        }
+      }
+      if (trackedStatus === 'rescheduled') {
+        if (!trackedNextContact) return { ...trackedBase, bucket:'scheduled_future', label:'Reprogramado', reason:'Reprogramado sin fecha valida en Firebase' };
+        const daysDue = daysBetween(trackedNextContact, today);
+        if (trackedNextContact.getTime() === today.getTime()) return { ...trackedBase, bucket:'due_today', label:'Hoy', reason:'Reprogramado para hoy en Firebase', relevantDate:trackedNextContact, relevantDateLabel:'Para contactar' };
+        if (trackedNextContact < today && daysDue <= 30) return { ...trackedBase, bucket:'overdue_recent', label:'Vencido reciente', reason:'Reprogramacion vencida en Firebase', relevantDate:trackedNextContact, relevantDateLabel:'Para contactar' };
+        if (trackedNextContact < today) return { ...trackedBase, bucket:'reactivation_old_client_or_warm', label:'Reactivacion', reason:'Reprogramacion antigua vencida en Firebase', relevantDate:trackedNextContact, relevantDateLabel:'Para contactar' };
+        if (trackedNextContact <= addDays(today, 7)) return { ...trackedBase, bucket:'upcoming', label:'Proximo', reason:'Reprogramado en los proximos 7 dias', relevantDate:trackedNextContact, relevantDateLabel:'Para contactar' };
+        return { ...trackedBase, bucket:'scheduled_future', label:'Programado', reason:'Reprogramado a futuro en Firebase', relevantDate:trackedNextContact, relevantDateLabel:'Para contactar' };
+      }
+      if (trackedStatus === 'no response' || trackedStatus === 'no_response') {
+        const days = trackedLastManaged ? daysBetween(trackedLastManaged, today) : 0;
+        if (days < NO_RESPONSE_COOLDOWN_DAYS) return { ...trackedBase, bucket:'ok', label:'No respondio', reason:'No respondio recientemente en Firebase', skippedByCooldown:true };
+      }
+      if (trackedStatus === 'skipped') {
+        const days = trackedLastManaged ? daysBetween(trackedLastManaged, today) : 0;
+        if (days < SKIPPED_COOLDOWN_DAYS) return { ...trackedBase, bucket:'ok', label:'Saltado', reason:'Saltado recientemente en Firebase', skippedByCooldown:true };
+      }
+    }
+
     if (isActiveOrEnrolled(row)) {
       return { rowIndex:index, attempts:getAttemptCount(row), rotation:stableDailyRotation(row, index, today), lastManaged:getLastManagedDate(row), relevantDate:null, relevantDateLabel:'', skippedByCooldown:false, bucket:'ok', label:'Matriculado', reason:'Matriculado o activo: fuera de seguimiento' };
     }
@@ -2067,6 +2200,9 @@
   }
 
   function getLastManagedDate(row){
+    const tracking = getTracking(row);
+    const trackedDate = parseFlexibleDate(tracking.lastManagedAt || tracking.updatedAt);
+    if (trackedDate) return trackedDate;
     return firstDateFrom(row, ['Fecha ultima gestion', 'Fecha Ãºltima gestiÃ³n', 'Fecha ultima revision', 'Fecha Ãºltima revisiÃ³n', 'Ultima gestion', 'Ãšltima gestiÃ³n']);
   }
 
@@ -2075,6 +2211,9 @@
   }
 
   function getAttemptCount(row){
+    const tracking = getTracking(row);
+    const trackedAttempts = Number(tracking.attempts);
+    if (Number.isFinite(trackedAttempts) && trackedAttempts > 0) return trackedAttempts;
     const raw = getField(row, ['Intentos', 'Numero de intentos', 'NÃºmero de intentos']);
     const n = Number(String(raw || '').replace(/[^\d]/g, ''));
     return Number.isFinite(n) ? n : 0;
@@ -2160,22 +2299,32 @@
       extra.reason = reason;
     }
 
-    btn.disabled = true;
+    const actionButtons = Array.from(alertsEl?.querySelectorAll('.alert-action') || []);
+    const originalText = btn.textContent;
+    actionButtons.forEach(actionBtn => { actionBtn.disabled = true; });
     btn.textContent = 'Guardando...';
+    status('Guardando seguimiento...');
     try {
-      const updated = buildManagedRow(row, action, extra);
-      await saveRowToFirebase(currentSheet, updated, true);
-      allRowsCache.delete(currentSheet);
-      await loadPage();
+      const updated = await saveTrackingToFirebase(currentSheet, row, action, extra);
+      upsertRowInLocalState(updated);
+      renderCurrentPage();
       await computeAndRenderAlerts();
+      status('Seguimiento guardado.');
     } catch (err) {
       console.error(err);
       alert(`No se pudo guardar la gestion: ${err?.message || err}`);
-      btn.disabled = false;
+      status(`Error al guardar seguimiento: ${err?.message || err}`);
+      actionButtons.forEach(actionBtn => { actionBtn.disabled = false; });
+      btn.textContent = originalText;
     }
   }
 
   function buildManagedRow(row, action, extra = {}){
+    return attachFirebaseMeta(row, {
+      data: { ...row },
+      tracking: buildTrackingUpdate(row, action, extra),
+      source: row.__source || null
+    }, row.__rowDocId);
     const out = { ...row };
     const now = currentDateTimeLocal();
     const today = toYMD(new Date());
@@ -2217,6 +2366,83 @@
     }
 
     return out;
+  }
+
+  function buildTrackingUpdate(row, action, extra = {}){
+    const previous = cloneTracking(getTracking(row));
+    const now = Date.now();
+    const today = toYMD(new Date());
+    const attempts = Number(previous.attempts || getAttemptCount(row) || 0) + 1;
+    const base = {
+      ...previous,
+      lastManagedAt: now,
+      advisorEmail: authUser?.email || '',
+      attempts,
+      updatedAt: now
+    };
+
+    if (action === 'contacted') {
+      return { ...base, status:'contacted', resultLabel:'Contactado', lastAction:'contacted', lastContactAt:now, nextContactAt:null, excludedReason:null };
+    }
+    if (action === 'no_response') {
+      return { ...base, status:'no_response', resultLabel:'No respondio', lastAction:'no_response', nextContactAt:addDays(today, NO_RESPONSE_COOLDOWN_DAYS).getTime(), excludedReason:null };
+    }
+    if (action === 'reschedule') {
+      const followUp = parseFlexibleDate(extra.followUpDate) || addDays(today, NO_RESPONSE_COOLDOWN_DAYS);
+      return { ...base, status:'rescheduled', resultLabel:'Reprogramado', lastAction:'rescheduled', nextContactAt:followUp.getTime(), excludedReason:null };
+    }
+    if (action === 'invalid_data') {
+      return { ...base, status:'invalid_data', resultLabel:'Datos invalidos', lastAction:'invalid_data', nextContactAt:null, auditAt:addDays(today, EXCLUDED_AUDIT_DAYS).getTime(), excludedReason:'Datos invalidos' };
+    }
+    if (action === 'confirm_excluded') {
+      return { ...base, status:'excluded', resultLabel:'Exclusion confirmada', lastAction:'excluded', nextContactAt:null, auditAt:addDays(today, CONFIRMED_EXCLUDED_AUDIT_DAYS).getTime(), excludedReason:extra.reason || 'No requiere seguimiento' };
+    }
+    if (action === 'enrolled') {
+      return { ...base, status:'enrolled', resultLabel:'Ya matriculado', lastAction:'enrolled', lastContactAt:now, nextContactAt:null, excludedReason:null };
+    }
+    if (action === 'recover') {
+      return { ...base, status:'recovered', resultLabel:'Recuperado para seguimiento', lastAction:'recovered', nextContactAt:today.getTime(), excludedReason:null };
+    }
+    if (action === 'skip') {
+      return { ...base, status:'skipped', resultLabel:'Saltado', lastAction:'skipped', nextContactAt:addDays(today, SKIPPED_COOLDOWN_DAYS).getTime(), excludedReason:extra.reason || null };
+    }
+    return { ...base, status:'pending', resultLabel:'Pendiente', lastAction:action || 'pending' };
+  }
+
+  function buildContactSnapshot(row) {
+    return {
+      nombre: getField(row, ['Nombre']) || null,
+      telefono: getField(row, ['Telefono', 'Celular', 'Celular/Telefono']) || null,
+      canal: getField(row, ['Canal', 'Canal de comunicacion']) || null,
+      asesor: getField(row, ['Asesor', 'Responsable']) || null
+    };
+  }
+
+  function renderCurrentPage() {
+    renderTable(currentHeaders, currentRows);
+  }
+
+  function upsertRowInLocalState(row) {
+    const idKey = keyColumnInUse || 'ID';
+    const id = String(row?.[idKey] ?? row?.ID ?? '').trim();
+    if (!id) return;
+    const same = (candidate) => String(candidate?.[idKey] ?? candidate?.ID ?? '').trim() === id;
+    const replaceIn = (rows) => {
+      const list = Array.isArray(rows) ? rows : [];
+      const idx = list.findIndex(same);
+      if (idx >= 0) list[idx] = row;
+      else list.push(row);
+      return list;
+    };
+
+    currentRows = replaceIn(currentRows);
+    displayedRows = replaceIn(displayedRows);
+
+    const cache = allRowsCache.get(currentSheet) || { headers: currentHeaders, rows: [], total: 0, ts: Date.now(), source: 'firebase' };
+    cache.rows = replaceIn(cache.rows);
+    cache.total = Math.max(Number(cache.total || 0), cache.rows.length);
+    cache.ts = Date.now();
+    allRowsCache.set(currentSheet, cache);
   }
 
   function setExistingField(row, names, value){
