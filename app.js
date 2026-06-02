@@ -16,6 +16,7 @@
   const btnNew     = document.getElementById('btnNew');
   const btnSyncFirebase = document.getElementById('btnSyncFirebase');
   const btnSyncSheets = document.getElementById('btnSyncSheets');
+  const btnAdvisorStats = document.getElementById('btnAdvisorStats');
   const btnGoogleLogin = document.getElementById('btnGoogleLogin');
   const firebaseStatusEl = document.getElementById('firebaseStatus');
   const progressPanel = document.getElementById('progressPanel');
@@ -39,6 +40,13 @@
 
   // 🔔 Avisos de urgentes/agendados (en la página)
   const alertsEl      = document.getElementById('alerts');
+  const advisorStatsPanel = document.getElementById('advisorStatsPanel');
+  const advisorStatsContent = document.getElementById('advisorStatsContent');
+  const advisorStatsSummary = document.getElementById('advisorStatsSummary');
+  const statsFrom = document.getElementById('statsFrom');
+  const statsTo = document.getElementById('statsTo');
+  const btnRefreshStats = document.getElementById('btnRefreshStats');
+  const btnCloseStats = document.getElementById('btnCloseStats');
 
   // ------- Config -------
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
@@ -48,6 +56,10 @@
     'catalina.medina.leal@gmail.com',
     'musicalaasesor@gmail.com',
     'imusicala@gmail.com'
+  ];
+  const ADMIN_EMAILS = [
+    'alekcaballeromusic@gmail.com',
+    'catalina.medina.leal@gmail.com'
   ];
   const firebaseDb = initFirebaseCache();
   const authReady = waitForFirebaseAuth();
@@ -160,6 +172,7 @@
     return;
   }
   lockDataUI(false);
+  setupAdvisorAdminUI();
 
   const meta = await fetchJSON(`${API_BASE}?mode=meta&_ts=${Date.now()}`).catch(showError);
   if (!meta || !Array.isArray(meta.sheets) || meta.sheets.length === 0) {
@@ -221,10 +234,18 @@
 
   // Nuevo cliente
   btnNew?.addEventListener('click', () => openNewModal());
+  btnAdvisorStats?.addEventListener('click', () => openAdvisorStats());
+  btnRefreshStats?.addEventListener('click', () => renderAdvisorStats());
+  btnCloseStats?.addEventListener('click', () => advisorStatsPanel?.classList.add('hidden'));
   btnSyncFirebase?.addEventListener('click', async () => {
     try {
       btnSyncFirebase.disabled = true;
       await syncCurrentSheetToFirebase(true);
+      await logAdvisorActivity('sync_firebase', {
+        sheetName: currentSheet,
+        label: 'Actualizo datos',
+        count: total || currentRows.length || 0
+      });
     } finally {
       btnSyncFirebase.disabled = false;
     }
@@ -232,7 +253,12 @@
   btnSyncSheets?.addEventListener('click', async () => {
     try {
       btnSyncSheets.disabled = true;
-      await syncPendingFirebaseToSheets(true);
+      const synced = await syncPendingFirebaseToSheets(true);
+      await logAdvisorActivity('sync_sheets', {
+        sheetName: currentSheet,
+        label: 'Guardo en principal',
+        count: synced || 0
+      });
     } finally {
       btnSyncSheets.disabled = false;
     }
@@ -597,6 +623,12 @@
             throw new Error(msg);
           }
           saveStatus.textContent = 'Creado ✓';
+          await logAdvisorActivity('create_record', {
+            sheetName: currentSheet,
+            rowId: String(formValues.ID || ''),
+            label: 'Creo registro',
+            contactSnapshot: buildContactSnapshot(formValues)
+          });
           allRowsCache.delete(currentSheet);
           await syncCurrentSheetToFirebase(false);
           await loadPage();
@@ -621,6 +653,14 @@
         }
 
         await saveRowToFirebase(currentSheet, { ...originalRow, ...formValues }, true);
+        await logAdvisorActivity('edit_record', {
+          sheetName: currentSheet,
+          rowId: key,
+          label: 'Edito registro',
+          changedFields: Object.keys(changes),
+          changedCount: Object.keys(changes).length,
+          contactSnapshot: buildContactSnapshot(formValues)
+        });
         saveStatus.textContent = 'Guardado ✓ Pendiente de enviar a principal';
         allRowsCache.delete(currentSheet);
         await loadPage();
@@ -876,7 +916,7 @@
   }
 
   function lockDataUI(locked) {
-    [sheetSel, searchBox, btnNew, btnSyncFirebase, btnSyncSheets].forEach((el) => {
+    [sheetSel, searchBox, btnNew, btnAdvisorStats, btnSyncFirebase, btnSyncSheets].forEach((el) => {
       if (!el) return;
       el.disabled = locked || ((el === btnSyncFirebase || el === btnSyncSheets) && !firebaseDb);
     });
@@ -905,6 +945,215 @@
 
   function setFirebaseStatus(msg) {
     if (firebaseStatusEl) firebaseStatusEl.textContent = msg;
+  }
+
+  function setupAdvisorAdminUI() {
+    if (btnAdvisorStats && isAdminUser(authUser)) {
+      btnAdvisorStats.classList.remove('hidden');
+      const today = todayISODate();
+      if (statsTo && !statsTo.value) statsTo.value = today;
+      if (statsFrom && !statsFrom.value) statsFrom.value = formatYMD(addDays(toYMD(new Date()), -6));
+    }
+  }
+
+  function isAdminUser(user) {
+    const email = String(user?.email || '').toLowerCase();
+    return ADMIN_EMAILS.includes(email);
+  }
+
+  function activityCollection() {
+    return firebaseDb ? firebaseDb.collection('advisorActivity') : null;
+  }
+
+  function currentAdvisorEmail() {
+    return String(authUser?.email || '');
+  }
+
+  async function logAdvisorActivity(type, details = {}) {
+    if (!firebaseDb || !authUser?.email) return;
+    const now = Date.now();
+    const email = currentAdvisorEmail();
+    const payload = {
+      type: String(type || 'event'),
+      advisorEmail: email,
+      advisorName: String(authUser.displayName || email),
+      createdAt: now,
+      date: formatYMD(toYMD(new Date(now))),
+      sheetName: String(details.sheetName || currentSheet || ''),
+      rowId: String(details.rowId || ''),
+      label: String(details.label || type || 'Evento'),
+      details: sanitizeActivityDetails(details)
+    };
+    await activityCollection().add(payload).catch((err) => {
+      console.warn('No se pudo registrar actividad del asesor:', err);
+    });
+  }
+
+  function sanitizeActivityDetails(details = {}) {
+    const allowed = {};
+    Object.entries(details).forEach(([key, value]) => {
+      if (['sheetName', 'rowId', 'label'].includes(key)) return;
+      if (value == null) allowed[key] = null;
+      else if (Array.isArray(value)) allowed[key] = value.map(v => String(v)).slice(0, 80);
+      else if (typeof value === 'object') allowed[key] = JSON.parse(JSON.stringify(value));
+      else allowed[key] = value;
+    });
+    return allowed;
+  }
+
+  function openAdvisorStats() {
+    if (!isAdminUser(authUser)) return;
+    advisorStatsPanel?.classList.remove('hidden');
+    renderAdvisorStats();
+  }
+
+  async function renderAdvisorStats() {
+    if (!firebaseDb || !isAdminUser(authUser)) return;
+    const from = statsFrom?.value || todayISODate();
+    const to = statsTo?.value || from;
+    const start = startOfDayMs(from);
+    const end = endOfDayMs(to);
+
+    advisorStatsContent.innerHTML = '<div class="alert-empty">Cargando estadisticas...</div>';
+    try {
+      const snap = await activityCollection()
+        .where('createdAt', '>=', start)
+        .where('createdAt', '<=', end)
+        .get();
+      const events = snap.docs.map(d => ({ id: d.id, ...(d.data() || {}) }));
+      const byAdvisor = groupAdvisorEvents(events);
+      const totals = summarizeAdvisorEvents(events);
+      advisorStatsSummary.textContent = `${events.length.toLocaleString()} evento(s) entre ${from} y ${to}.`;
+      advisorStatsContent.innerHTML = renderAdvisorStatsHTML(byAdvisor, totals, from, to);
+    } catch (err) {
+      console.error(err);
+      advisorStatsContent.innerHTML = `<div class="alert-empty">No se pudieron cargar las estadisticas: ${esc(err?.message || err)}</div>`;
+    }
+  }
+
+  function groupAdvisorEvents(events) {
+    const grouped = new Map();
+    events.forEach((event) => {
+      const email = String(event.advisorEmail || 'sin-correo').toLowerCase();
+      if (!grouped.has(email)) grouped.set(email, []);
+      grouped.get(email).push(event);
+    });
+    return Array.from(grouped.entries())
+      .map(([email, list]) => ({ email, name: list.find(e => e.advisorName)?.advisorName || email, events: list, summary: summarizeAdvisorEvents(list) }))
+      .sort((a, b) => b.summary.productiveScore - a.summary.productiveScore);
+  }
+
+  function summarizeAdvisorEvents(events) {
+    const typeCounts = {};
+    const sheetCounts = {};
+    const actionCounts = {};
+    const editedFields = {};
+    const uniqueRows = new Set();
+    const days = new Set();
+
+    events.forEach((event) => {
+      const type = event.type || 'event';
+      typeCounts[type] = (typeCounts[type] || 0) + 1;
+      if (event.sheetName) sheetCounts[event.sheetName] = (sheetCounts[event.sheetName] || 0) + 1;
+      if (event.rowId) uniqueRows.add(`${event.sheetName || ''}:${event.rowId}`);
+      if (event.date) days.add(event.date);
+      const details = event.details || {};
+      const action = details.resultLabel || details.action;
+      if (action) actionCounts[action] = (actionCounts[action] || 0) + 1;
+      (details.changedFields || []).forEach((field) => {
+        editedFields[field] = (editedFields[field] || 0) + 1;
+      });
+    });
+
+    const recordsCreated = typeCounts.create_record || 0;
+    const recordsEdited = typeCounts.edit_record || 0;
+    const trackingActions = typeCounts.tracking_action || 0;
+    const syncs = (typeCounts.sync_firebase || 0) + (typeCounts.sync_sheets || 0);
+    const changedFieldsTotal = events.reduce((sum, e) => sum + Number(e.details?.changedCount || 0), 0);
+    const productiveScore = recordsCreated * 5 + recordsEdited * 3 + trackingActions * 4 + changedFieldsTotal + syncs;
+
+    return {
+      totalEvents: events.length,
+      recordsCreated,
+      recordsEdited,
+      trackingActions,
+      syncs,
+      changedFieldsTotal,
+      uniqueRows: uniqueRows.size,
+      daysWorked: days.size,
+      productiveScore,
+      typeCounts,
+      sheetCounts,
+      actionCounts,
+      editedFields
+    };
+  }
+
+  function renderAdvisorStatsHTML(groups, totals, from, to) {
+    if (!groups.length) return '<div class="alert-empty">No hay actividad registrada en este rango.</div>';
+    return `
+      <div class="stats-overview">
+        ${statsMetric('Eventos', totals.totalEvents)}
+        ${statsMetric('Registros creados', totals.recordsCreated)}
+        ${statsMetric('Ediciones', totals.recordsEdited)}
+        ${statsMetric('Gestiones', totals.trackingActions)}
+        ${statsMetric('Registros tocados', totals.uniqueRows)}
+      </div>
+      <div class="advisor-grid">
+        ${groups.map(group => renderAdvisorCard(group, from, to)).join('')}
+      </div>
+    `;
+  }
+
+  function renderAdvisorCard(group) {
+    const s = group.summary;
+    return `
+      <article class="advisor-card">
+        <div class="advisor-card-head">
+          <div>
+            <h3>${esc(group.name)}</h3>
+            <p>${esc(group.email)}</p>
+          </div>
+          <strong>${s.productiveScore.toLocaleString()} pts</strong>
+        </div>
+        <div class="stats-overview compact">
+          ${statsMetric('Eventos', s.totalEvents)}
+          ${statsMetric('Creados', s.recordsCreated)}
+          ${statsMetric('Editados', s.recordsEdited)}
+          ${statsMetric('Gestiones', s.trackingActions)}
+          ${statsMetric('Campos', s.changedFieldsTotal)}
+          ${statsMetric('Dias', s.daysWorked)}
+        </div>
+        ${statsList('Acciones de seguimiento', s.actionCounts)}
+        ${statsList('Hojas trabajadas', s.sheetCounts)}
+        ${statsList('Campos mas editados', s.editedFields)}
+      </article>
+    `;
+  }
+
+  function statsMetric(label, value) {
+    return `<div class="stats-metric"><span>${esc(label)}</span><strong>${Number(value || 0).toLocaleString()}</strong></div>`;
+  }
+
+  function statsList(title, counts) {
+    const entries = Object.entries(counts || {}).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    if (!entries.length) return '';
+    return `
+      <div class="stats-list">
+        <h4>${esc(title)}</h4>
+        ${entries.map(([label, value]) => `<div><span>${esc(label)}</span><strong>${Number(value || 0).toLocaleString()}</strong></div>`).join('')}
+      </div>
+    `;
+  }
+
+  function startOfDayMs(ymd) {
+    const d = parseYMD(ymd) || toYMD(new Date());
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+  }
+
+  function endOfDayMs(ymd) {
+    const d = parseYMD(ymd) || toYMD(new Date());
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).getTime();
   }
 
   function showProgress(title, text, percent = 0) {
@@ -1081,7 +1330,7 @@
     const snap = await doc.collection('rows').where('pendingSheetSync', '==', true).get();
     if (snap.empty) {
       if (showMessages) status('No hay cambios pendientes por guardar en la base principal.');
-      return;
+      return 0;
     }
 
     if (showMessages) status(`Guardando ${snap.size.toLocaleString()} cambio(s) en la base principal...`);
@@ -1102,6 +1351,7 @@
 
     allRowsCache.delete(currentSheet);
     if (showMessages) status(`${done.toLocaleString()} cambio(s) guardados en la base principal.`);
+    return done;
   }
 
   async function runDailySyncIfNeeded() {
@@ -1564,6 +1814,17 @@
       notes: extra.notes || null,
       reason: extra.reason || null,
       nextContactAt: tracking.nextContactAt || null
+    });
+
+    await logAdvisorActivity('tracking_action', {
+      sheetName,
+      rowId: id,
+      action: tracking.lastAction || action,
+      resultLabel: tracking.resultLabel || action,
+      label: `Gestion: ${tracking.resultLabel || action}`,
+      contactSnapshot: buildContactSnapshot(row),
+      nextContactAt: tracking.nextContactAt || null,
+      reason: extra.reason || null
     });
 
     await doc.set({

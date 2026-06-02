@@ -39,6 +39,7 @@
 
       <!-- botón crear registro -->
       <button id="btnNew" class="btn" type="button" title="Crear nuevo cliente">+ Nuevo</button>
+      <button id="btnAdvisorStats" class="btn hidden" type="button" title="Ver estadisticas por asesor">Estadisticas</button>
       <button id="btnSyncFirebase" class="btn" type="button" title="Actualizar la base de datos">Actualizar datos</button>
       <button id="btnSyncSheets" class="btn" type="button" title="Guardar cambios en la base principal">Guardar en principal</button>
     </div>
@@ -72,6 +73,29 @@
     </div>
 
     <section id="alerts" class="alerts hidden" aria-label="Avisos de seguimiento"></section>
+
+    <section id="advisorStatsPanel" class="advisor-stats hidden" aria-label="Estadisticas por asesor">
+      <div class="advisor-stats-head">
+        <div>
+          <span class="alert-eyebrow">Administracion</span>
+          <h2>Estadisticas por asesor</h2>
+          <p id="advisorStatsSummary">Actividad registrada en la aplicacion.</p>
+        </div>
+        <div class="advisor-stats-controls">
+          <label>
+            Desde
+            <input id="statsFrom" type="date" />
+          </label>
+          <label>
+            Hasta
+            <input id="statsTo" type="date" />
+          </label>
+          <button id="btnRefreshStats" class="btn" type="button">Actualizar</button>
+          <button id="btnCloseStats" class="btn" type="button">Cerrar</button>
+        </div>
+      </div>
+      <div id="advisorStatsContent" class="advisor-stats-content"></div>
+    </section>
 
     <div class="table-wrap" role="region" aria-live="polite">
       <table id="dataTable" class="data-table" aria-describedby="status"></table>

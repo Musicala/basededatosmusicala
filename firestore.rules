@@ -1,0 +1,145 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function allowedUser() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+          'alekcaballeromusic@gmail.com',
+          'catalina.medina.leal@gmail.com',
+          'musicalaasesor@gmail.com',
+          'imusicala@gmail.com'
+        ];
+    }
+
+    function adminUser() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+          'alekcaballeromusic@gmail.com',
+          'catalina.medina.leal@gmail.com'
+        ];
+    }
+
+    function validSheetCacheMeta() {
+      return request.resource.data.keys().hasOnly([
+        'sheetName',
+        'headers',
+        'total',
+        'updatedAt',
+        'source',
+        'dailySyncDate',
+        'dailySyncStartedAt',
+        'dailySyncFinishedAt'
+      ])
+      && (!('sheetName' in request.resource.data) || request.resource.data.sheetName is string)
+      && (!('headers' in request.resource.data) || request.resource.data.headers is list)
+      && (!('total' in request.resource.data) || request.resource.data.total is int)
+      && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt is number)
+      && (!('source' in request.resource.data) || request.resource.data.source == 'sheets')
+      && (!('dailySyncDate' in request.resource.data) || request.resource.data.dailySyncDate is string)
+      && (!('dailySyncStartedAt' in request.resource.data) || request.resource.data.dailySyncStartedAt is number)
+      && (!('dailySyncFinishedAt' in request.resource.data) || request.resource.data.dailySyncFinishedAt is number);
+    }
+
+    function validSheetCacheRow() {
+      return request.resource.data.keys().hasOnly([
+        'data',
+        'tracking',
+        'source',
+        'updatedAt',
+        'pendingSheetSync',
+        'pendingReason',
+        'syncedAt'
+      ])
+      && request.resource.data.data is map
+      && request.resource.data.updatedAt is number
+      && (!('tracking' in request.resource.data) || request.resource.data.tracking is map)
+      && (!('source' in request.resource.data) || request.resource.data.source is map)
+      && (!('pendingSheetSync' in request.resource.data) || request.resource.data.pendingSheetSync is bool)
+      && (!('pendingReason' in request.resource.data) || request.resource.data.pendingReason is string)
+      && (!('syncedAt' in request.resource.data) || request.resource.data.syncedAt == null || request.resource.data.syncedAt is number);
+    }
+
+    function validSeguimientoLog() {
+      return request.resource.data.keys().hasOnly([
+        'action',
+        'resultLabel',
+        'advisorEmail',
+        'createdAt',
+        'previousTracking',
+        'newTracking',
+        'contactSnapshot',
+        'notes',
+        'reason',
+        'nextContactAt'
+      ])
+      && request.resource.data.action is string
+      && request.resource.data.resultLabel is string
+      && request.resource.data.advisorEmail is string
+      && request.resource.data.createdAt is number
+      && request.resource.data.previousTracking is map
+      && request.resource.data.newTracking is map
+      && request.resource.data.contactSnapshot is map
+      && (!('notes' in request.resource.data) || request.resource.data.notes == null || request.resource.data.notes is string)
+      && (!('reason' in request.resource.data) || request.resource.data.reason == null || request.resource.data.reason is string)
+      && (!('nextContactAt' in request.resource.data) || request.resource.data.nextContactAt == null || request.resource.data.nextContactAt is number);
+    }
+
+    function validAdvisorActivity() {
+      return request.resource.data.keys().hasOnly([
+        'type',
+        'advisorEmail',
+        'advisorName',
+        'createdAt',
+        'date',
+        'sheetName',
+        'rowId',
+        'label',
+        'details'
+      ])
+      && request.resource.data.type is string
+      && request.resource.data.advisorEmail == request.auth.token.email
+      && request.resource.data.advisorName is string
+      && request.resource.data.createdAt is number
+      && request.resource.data.date is string
+      && request.resource.data.sheetName is string
+      && request.resource.data.rowId is string
+      && request.resource.data.label is string
+      && request.resource.data.details is map;
+    }
+
+    match /sheetCache/{sheetId} {
+      allow read: if allowedUser();
+      allow create, update: if allowedUser() && validSheetCacheMeta();
+      allow delete: if false;
+
+      match /rows/{rowId} {
+        allow read: if allowedUser();
+        allow create, update: if allowedUser() && validSheetCacheRow();
+        allow delete: if false;
+
+        match /seguimientos/{logId} {
+          allow read: if allowedUser();
+          allow create: if allowedUser() && validSeguimientoLog();
+          allow update, delete: if false;
+        }
+      }
+    }
+
+    match /advisorActivity/{eventId} {
+      allow read: if adminUser();
+      allow create: if allowedUser() && validAdvisorActivity();
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
