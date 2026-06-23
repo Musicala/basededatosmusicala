@@ -40,6 +40,7 @@
 
   // 🔔 Avisos de urgentes/agendados (en la página)
   const alertsEl      = document.getElementById('alerts');
+  const todayViewEl   = document.getElementById('todayView');
   const advisorStatsPanel = document.getElementById('advisorStatsPanel');
   const advisorStatsContent = document.getElementById('advisorStatsContent');
   const advisorStatsSummary = document.getElementById('advisorStatsSummary');
@@ -51,6 +52,9 @@
   // ------- Config -------
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
   const API_BASE = window.API_BASE;
+  const APP_VERSION = '1.3.0';
+  const appVersionEl = document.getElementById('appVersion');
+  if (appVersionEl) appVersionEl.textContent = `v${APP_VERSION}`;
   const ALLOWED_EMAILS = [
     'alekcaballeromusic@gmail.com',
     'catalina.medina.leal@gmail.com',
@@ -66,6 +70,29 @@
 
   // 🔒 Clave SOLO "ID"
   const KEY_CANDIDATES = ['ID'];
+
+  const FIELD_ALIASES = {
+    id: ['ID'],
+    name: ['Nombre', 'Nombre completo', 'Nombre acudiente', 'Estudiante'],
+    phone: ['Celular/TelÃ©fono', 'Celular/Telefono', 'Telefono', 'TelÃ©fono', 'Celular', 'WhatsApp'],
+    email: ['Correo ElectrÃ³nico', 'Correo Electronico', 'Email', 'Correo'],
+    channel: ['Canal de comunicaciÃ³n', 'Canal de comunicacion', 'Canal'],
+    advisor: ['Asesor', 'Responsable', 'Asesor asignado'],
+    art: ['ARTE', 'Arte I', 'Arte principal'],
+    instrument: ['Instrumento/Estilo/TÃ©cnica I', 'Instrumento/Estilo/Tecnica I', 'Instrumento', 'Estilo'],
+    modality: ['Modalidad'],
+    plan: ['Curso/Plan', 'Plan', 'Curso'],
+    priority: ['Prioridad'],
+    nextContact: ['Fecha para contactar', 'Proximo contacto', 'PrÃ³ximo contacto', 'Fecha proximo contacto', 'Fecha prÃ³ximo contacto'],
+    lastContact: ['Fecha y hora de contacto', 'Fecha ultima gestion', 'Fecha Ãºltima gestiÃ³n', 'Ultima gestion', 'Ãšltima gestiÃ³n'],
+    lastManaged: ['Fecha ultima gestion', 'Fecha Ãºltima gestiÃ³n', 'Ultima gestion', 'Ãšltima gestiÃ³n'],
+    result: ['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado', 'Resultado de gestion', 'Resultado de gestiÃ³n'],
+    status: ['Estado de seguimiento', 'Estado', 'Status'],
+    attempts: ['Intentos', 'Numero de intentos', 'NÃºmero de intentos'],
+    exclusionReason: ['Motivo de exclusion', 'Motivo de exclusiÃ³n'],
+    nextAudit: ['Fecha proxima auditoria', 'Fecha prÃ³xima auditorÃ­a', 'Proxima auditoria', 'PrÃ³xima auditorÃ­a'],
+    lastRevision: ['Fecha ultima revision', 'Fecha Ãºltima revisiÃ³n']
+  };
 
   // ====== Catálogos (listas fijas) ======
   const OPTIONS = {
@@ -139,11 +166,18 @@
 
   // ===== Búsqueda GLOBAL =====
   const allRowsCache = new Map(); // sheet -> { headers, rows, total, ts }
+  const allRowsLoadPromises = new Map(); // sheet -> Promise<{ headers, rows, total, ts }>
   let searchActive   = false;
 
   // OJO: displayedRows SIEMPRE debe ser exactamente lo que está renderizado
   let displayedRows  = []; // filas actualmente renderizadas (página o filtradas y/o ordenadas)
   let alertFilter = 'all';
+  let todayViewExpanded = false;
+  let followUpRefreshTimer = null;
+  let followUpRefreshToken = 0;
+  let dailySyncScheduled = false;
+  let fauxProgressTimer = null;
+  let hideProgressTimer = null;
   const TOP_RECOMMENDED_LIMIT = 10;
   const NO_RESPONSE_COOLDOWN_DAYS = 2;
   const CONTACTED_COOLDOWN_DAYS = 7;
@@ -159,6 +193,42 @@
     excluded_audit: 1,
     general_rotation: 1
   };
+  const CRM_STAGES = {
+    new: { label: 'Nuevo', className: 'crm-new' },
+    contacted: { label: 'Contactado', className: 'crm-contacted' },
+    interested: { label: 'Interesado', className: 'crm-interested' },
+    trial_scheduled: { label: 'Clase agendada', className: 'crm-trial' },
+    trial_done: { label: 'Clase realizada', className: 'crm-trial' },
+    payment_pending: { label: 'Pendiente pago', className: 'crm-payment' },
+    enrolled: { label: 'Matriculado', className: 'crm-enrolled' },
+    not_interested: { label: 'No interesado', className: 'crm-closed' },
+    reactivation: { label: 'Reactivar', className: 'crm-reactivation' },
+    invalid: { label: 'Datos invalidos', className: 'crm-invalid' },
+    archived: { label: 'Archivado', className: 'crm-archived' }
+  };
+  const CRM_TEMPERATURES = {
+    hot: { label: 'Caliente', className: 'temp-hot' },
+    warm: { label: 'Tibio', className: 'temp-warm' },
+    cold: { label: 'Frio', className: 'temp-cold' },
+    frozen: { label: 'Congelado', className: 'temp-frozen' }
+  };
+  const WHATSAPP_TEMPLATES = [
+    { id:'first_contact', label:'Primer contacto', text:'Hola, {{nombre}}. Te saluda {{asesor}} de Musicala. Vimos que estas interesado/a en {{arte}} y queremos ayudarte a encontrar el mejor horario para ti. Te puedo compartir opciones en {{modalidad}}?' },
+    { id:'kind_followup', label:'Seguimiento amable', text:'Hola, {{nombre}}. Paso a saludarte desde Musicala para saber si pudiste revisar la informacion de {{arte}}. Quieres que miremos horarios o modalidad?' },
+    { id:'no_response', label:'No respuesta', text:'Hola, {{nombre}}. Te escribo nuevamente de Musicala. Si aun te interesa {{arte}}, puedo ayudarte a encontrar una opcion que se acomode a tu tiempo.' },
+    { id:'trial_confirm', label:'Confirmacion clase de prueba', text:'Hola, {{nombre}}. Confirmamos tu clase de prueba de {{arte}} para el {{fecha}} a las {{hora}}. Modalidad: {{modalidad}}. Te esperamos en Musicala.' },
+    { id:'trial_reminder', label:'Recordatorio clase de prueba', text:'Hola, {{nombre}}. Te recordamos tu clase de prueba de {{arte}} programada para {{fecha}} a las {{hora}}. Cualquier duda me escribes.' },
+    { id:'after_trial', label:'Despues de clase de prueba', text:'Hola, {{nombre}}. Gracias por vivir la clase de prueba de {{arte}} con Musicala. Quieres que avancemos con horarios y proceso de matricula?' },
+    { id:'payment_pending', label:'Pendiente de pago', text:'Hola, {{nombre}}. Quedamos atentos para ayudarte a finalizar el proceso de pago y separar tu cupo de {{arte}} en Musicala.' },
+    { id:'reactivation', label:'Reactivacion', text:'Hola, {{nombre}}. Te saluda {{asesor}} de Musicala. Queremos saber si te gustaria retomar tu interes por {{arte}}. Tenemos opciones nuevas que podrian servirte.' },
+    { id:'vacation', label:'Vacacionales', text:'Hola, {{nombre}}. En Musicala tenemos programas vacacionales para disfrutar y aprender arte. Te gustaria que te comparta opciones?' },
+    { id:'adults', label:'Adultos', text:'Hola, {{nombre}}. En Musicala tambien tenemos clases para adultos en {{arte}}. Podemos revisar una opcion segun tu nivel y disponibilidad.' },
+    { id:'music', label:'Musica', text:'Hola, {{nombre}}. Te comparto informacion sobre clases de musica en Musicala. Podemos revisar instrumento, modalidad y horarios.' },
+    { id:'dance', label:'Danzas', text:'Hola, {{nombre}}. Tenemos opciones de danza en Musicala para diferentes edades y niveles. Te gustaria que revisemos horarios?' },
+    { id:'theatre', label:'Teatro', text:'Hola, {{nombre}}. En Musicala tenemos clases de teatro para explorar expresion, creatividad y confianza. Te comparto opciones?' },
+    { id:'visual_arts', label:'Artes plasticas', text:'Hola, {{nombre}}. Tenemos clases de artes plasticas en Musicala. Podemos revisar tecnica, edad y modalidad para recomendarte la mejor opcion.' },
+    { id:'closing', label:'Cierre por no respuesta', text:'Hola, {{nombre}}. Como no hemos logrado comunicarnos, dejaremos tu solicitud en pausa por ahora. Si quieres retomar {{arte}} en Musicala, puedes escribirme y con gusto te ayudo.' }
+  ];
   btnGoogleLogin?.addEventListener('click', () => signInWithGoogle());
 
   /* =============================
@@ -174,22 +244,27 @@
   lockDataUI(false);
   setupAdvisorAdminUI();
 
-  const meta = await fetchJSON(`${API_BASE}?mode=meta&_ts=${Date.now()}`).catch(showError);
-  if (!meta || !Array.isArray(meta.sheets) || meta.sheets.length === 0) {
-    status('No se encontraron hojas.');
+  const sheetNames = await loadSheetNamesFromFirebase();
+  if (!sheetNames.length) {
+    sheetSel.innerHTML = '<option>Sin datos en Firebase</option>';
+    currentHeaders = [];
+    currentRows = [];
+    total = 0;
+    renderTable([], []);
+    status('No hay hojas cargadas en Firebase. Usa "Actualizar datos" despues de elegir una hoja inicial en la configuracion o haz una primera sincronizacion desde Sheets.');
+    setFirebaseStatus('No hay cache de hojas en Firebase todavia.');
     return;
   }
 
-  sheetSel.innerHTML = meta.sheets
+  sheetSel.innerHTML = sheetNames
     .map((n) => `<option value="${escAttr(n)}">${esc(n)}</option>`)
     .join('');
 
-  const initial = meta.sheets.find((n) => /base de datos general/i.test(n)) || meta.sheets[0];
+  const initial = sheetNames.find((n) => /base de datos general/i.test(n)) || sheetNames[0];
   sheetSel.value = initial;
   currentSheet   = initial;
 
-  await runDailySyncIfNeeded();
-  await loadPage();
+  await loadPage(true);
 
   /* =============================
      2) Eventos UI
@@ -208,21 +283,21 @@
     if (searchActive) return;
     if (offset <= 0) return;
     offset = Math.max(0, offset - limit);
-    await loadPage();
+    await loadPage(false, false);
   });
 
   btnNext?.addEventListener('click', async () => {
     if (searchActive) return;
     if (offset + limit >= total) return;
     offset = offset + limit;
-    await loadPage();
+    await loadPage(false, false);
   });
 
   pageSizeEl?.addEventListener('change', async () => {
     if (searchActive) return;
     limit = parseInt(pageSizeEl.value, 10) || 200;
     offset = 0;
-    await loadPage();
+    await loadPage(false, false);
   });
 
   // Búsqueda GLOBAL con debounce
@@ -283,13 +358,29 @@
   /* =============================
      3) Lógica de datos (paginado normal)
      ============================= */
-  async function loadPage() {
+  async function loadPage(withProgress = false, refreshToday = true) {
     status(`Cargando “${currentSheet}”…`);
-    const cached = await loadSheetFromFirebase(currentSheet);
+    if (withProgress) startFauxProgress('Cargando la base de datos', `Conectando con la base y trayendo "${currentSheet}"...`, { start: 12, ceiling: 85 });
+    // Vigilante: si la base no responde, avisamos en vez de quedarnos colgados en silencio.
+    const watchdog = window.setTimeout(() => {
+      status('La base esta tardando mas de lo normal. Revisa tu conexion a internet; si persiste, recarga la pagina (Ctrl+Shift+R).');
+      if (withProgress) setProgress(86, 'Esperando respuesta de la base...');
+    }, 15000);
+    let cached;
+    try {
+      cached = await loadSheetPageFromFirebase(currentSheet, offset, limit);
+    } catch (err) {
+      window.clearTimeout(watchdog);
+      if (withProgress) { stopFauxProgressTimer(); hideProgress(); }
+      status(`No se pudo cargar la base: ${err?.message || err}. Recarga la pagina (Ctrl+Shift+R).`);
+      throw err;
+    }
+    window.clearTimeout(watchdog);
+    if (withProgress) finishFauxProgress('Base lista.');
     if (cached) {
       currentHeaders = cached.headers;
       total = cached.total;
-      currentRows = (cached.rows || []).slice(offset, offset + limit);
+      currentRows = cached.rows || [];
       keyColumnInUse = pickKeyColumn(currentHeaders);
       renderTable(currentHeaders, currentRows);
 
@@ -299,17 +390,28 @@
       if (btnPrev) btnPrev.disabled = offset <= 0;
       if (btnNext) btnNext.disabled = offset + limit >= total;
       status(`Listo. Mostrando ${currentRows.length.toLocaleString()} de ${total.toLocaleString()} registros.`);
-      allRowsCache.set(currentSheet, cached);
-      await computeAndRenderAlerts();
+      // "Hoy" depende de toda la base, no de la pagina visible: solo lo refrescamos
+      // en carga inicial / cambio de hoja / cambios de datos, no al paginar.
+      if (refreshToday) {
+        renderFollowUpPlaceholder();
+        scheduleFollowUpRefresh(250);
+      }
       return;
     }
 
-    const url = `${API_BASE}?mode=data&sheet=${encodeURIComponent(currentSheet)}&limit=${limit}&offset=${offset}&_ts=${Date.now()}`;
-    const res = await fetchJSON(url).catch(showError);
-    if (!res || !Array.isArray(res.headers)) {
-      status('Error cargando datos.');
-      return;
-    }
+    currentHeaders = [];
+    currentRows = [];
+    total = 0;
+    keyColumnInUse = '';
+    renderTable(currentHeaders, currentRows);
+    if (pageInfo) pageInfo.textContent = 'Sin registros en Firebase';
+    if (btnPrev) btnPrev.disabled = true;
+    if (btnNext) btnNext.disabled = true;
+    status(`No hay datos guardados en Firebase para "${currentSheet}". Usa "Actualizar datos" para traerlos desde Sheets.`);
+    setFirebaseStatus('Modo Firebase-first: Sheets solo se consulta con Actualizar datos.');
+    renderFollowUpPlaceholder();
+    scheduleFollowUpRefresh(250);
+    return;
 
     currentHeaders = res.headers;
     currentRows    = res.rows || [];
@@ -334,11 +436,12 @@
     if (btnNext) btnNext.disabled = offset + limit >= total;
 
     // 🔔 Calcular y pintar alertas
-    await computeAndRenderAlerts();
+    renderFollowUpPlaceholder();
   }
 
   function renderTable(headers, rows) {
     const nameIdx = headers.findIndex((h) => h.trim().toLowerCase() === 'nombre');
+    const visibleHeaders = ['__crmStage', '__crmTemperature', ...headers];
 
     // Si hay una columna activa, ordena una copia
     let toRender = rows;
@@ -358,11 +461,12 @@
     displayedRows = toRender;
 
     const thead = `<thead><tr>${
-      headers.map((h) => {
+      visibleHeaders.map((h) => {
         const isActive = sortState.key === h;
         const dirAttr  = isActive ? ` data-dir="${sortState.dir}"` : '';
+        const label = h === '__crmStage' ? 'Etapa CRM' : h === '__crmTemperature' ? 'Temperatura' : h;
         return `<th class="th-sortable" data-key="${escAttr(h)}"${dirAttr}>
-                  <span>${esc(h)}</span>
+                  <span>${esc(label)}</span>
                   <span class="th-sort-ind"></span>
                 </th>`;
       }).join('')
@@ -370,7 +474,11 @@
 
     const tbody = `<tbody>${
       toRender.map((r, i) => {
-        const tds = headers.map((h, colIdx) => {
+        const crm = normalizeCrm(r);
+        const tds = visibleHeaders.map((h) => {
+          if (h === '__crmStage') return `<td>${renderCrmStageBadge(crm.stage)}</td>`;
+          if (h === '__crmTemperature') return `<td>${renderTemperatureBadge(crm.temperature, crm.leadScore)}</td>`;
+          const colIdx = headers.indexOf(h);
           const val = r[h];
           if (colIdx === nameIdx) {
             const label = (val == null || String(val).trim() === '') ? '(Sin nombre)' : String(val);
@@ -386,7 +494,7 @@
 
     // ancho mínimo para scroll
     const pxPerCol = 140;
-    table.style.minWidth = (headers.length * pxPerCol) + 'px';
+    table.style.minWidth = (visibleHeaders.length * pxPerCol) + 'px';
 
     // listeners ordenar
     table.querySelectorAll('thead th.th-sortable').forEach(th => {
@@ -402,10 +510,27 @@
 
   // Carga TODA la hoja y la junta
   async function loadAllRowsForSheet(sheetName) {
-    const cached = await loadSheetFromFirebase(sheetName);
-    if (cached) return cached;
+    const cachedInMemory = allRowsCache.get(sheetName);
+    if (cachedInMemory?.rows?.length) return cachedInMemory;
 
-    return fetchAllRowsFromSheets(sheetName, true);
+    const pending = allRowsLoadPromises.get(sheetName);
+    if (pending) return pending;
+
+    const loadPromise = (async () => {
+      const cached = await loadSheetFromFirebase(sheetName);
+      if (cached) return cached;
+
+      return { headers: currentHeaders, rows: [], total: 0, ts: Date.now(), source: 'firebase-empty' };
+    })();
+
+    allRowsLoadPromises.set(sheetName, loadPromise);
+    try {
+      const loaded = await loadPromise;
+      allRowsCache.set(sheetName, loaded);
+      return loaded;
+    } finally {
+      allRowsLoadPromises.delete(sheetName);
+    }
   }
 
   async function fetchAllRowsFromSheets(sheetName, mirrorToFirebase = false) {
@@ -547,10 +672,12 @@
     const headers = orderHeaders(currentHeaders, preferredOrder);
 
     // Render fields (✅ aquí NO se consulta el DOM todavía)
-    modalBody.innerHTML = headers.map((h) => renderFieldHTML(h, row[h] ?? '', row, isNew)).join('');
+    modalBody.innerHTML = renderCrmSummaryHTML(row) + renderWhatsAppTemplatesHTML(row) + renderHistoryHTML(isNew) + headers.map((h) => renderFieldHTML(h, row[h] ?? '', row, isNew)).join('');
 
     // ✅ Ahora sí: como ya existe el DOM del modal, conectamos WhatsApp + dependencias
     wireWhatsAppButton();
+    wireWhatsAppTemplates(row);
+    if (!isNew) loadModalHistory(row);
     if (isNew) wireArteDependencies(); // en nuevo, ya editable
 
     const footer = modal.querySelector('.modal-footer');
@@ -610,18 +737,20 @@
         validateTrackingDates(formValues);
 
         if (creatingNew) {
-          const body = new URLSearchParams({
-            mode: 'add',
-            sheet: currentSheet,
-            row: JSON.stringify(formValues)
+          if (!String(formValues.ID || '').trim()) formValues.ID = `crm-${Date.now()}`;
+          await saveRowToFirebase(currentSheet, formValues, true);
+          saveStatus.textContent = 'Creado en Firebase. Pendiente de enviar a principal';
+          await logAdvisorActivity('create_record', {
+            sheetName: currentSheet,
+            rowId: String(formValues.ID || ''),
+            label: 'Creo registro',
+            contactSnapshot: buildContactSnapshot(formValues)
           });
-          const r = await fetch(API_BASE, { method:'POST', headers:{Accept:'application/json'}, body });
-          let json = null, txt = '';
-          try { json = await r.json(); } catch (_) { txt = await r.text(); }
-          if (!r.ok || json?.ok !== true) {
-            const msg = (json && json.error) || txt || `HTTP ${r.status}`;
-            throw new Error(msg);
-          }
+          allRowsCache.delete(currentSheet);
+          await loadPage();
+          closeModal();
+          return;
+
           saveStatus.textContent = 'Creado ✓';
           await logAdvisorActivity('create_record', {
             sheetName: currentSheet,
@@ -630,7 +759,6 @@
             contactSnapshot: buildContactSnapshot(formValues)
           });
           allRowsCache.delete(currentSheet);
-          await syncCurrentSheetToFirebase(false);
           await loadPage();
           closeModal();
           return;
@@ -813,6 +941,162 @@
       phoneEl.dataset.waBound = '1';
     }
     update();
+  }
+
+  function renderWhatsAppTemplatesHTML(row) {
+    const first = WHATSAPP_TEMPLATES[0];
+    return `<section class="whatsapp-panel field">
+      <div class="label">WhatsApp con plantilla</div>
+      <div class="value whatsapp-template-box">
+        <div class="whatsapp-template-controls">
+          <select id="waTemplateSelect" class="in">
+            ${WHATSAPP_TEMPLATES.map(t => `<option value="${escAttr(t.id)}">${esc(t.label)}</option>`).join('')}
+          </select>
+          <button id="btnCopyWaTemplate" class="btn" type="button">Copiar</button>
+          <a id="btnOpenWaTemplate" class="btn btn-whatsapp-mini" target="_blank" rel="noopener">Abrir WhatsApp</a>
+        </div>
+        <textarea id="waTemplatePreview" class="in" rows="4">${esc(fillWhatsAppTemplate(first.text, row))}</textarea>
+        <span id="waTemplateStatus" class="crm-meta"></span>
+      </div>
+    </section>`;
+  }
+
+  function wireWhatsAppTemplates(row) {
+    const select = modalBody.querySelector('#waTemplateSelect');
+    const preview = modalBody.querySelector('#waTemplatePreview');
+    const copyBtn = modalBody.querySelector('#btnCopyWaTemplate');
+    const openBtn = modalBody.querySelector('#btnOpenWaTemplate');
+    const statusEl = modalBody.querySelector('#waTemplateStatus');
+    if (!select || !preview || !openBtn) return;
+
+    const updateLink = () => {
+      const phone = normalizePhone(getField(row, 'phone'));
+      const num = phone.startsWith('57') ? phone.slice(2) : phone;
+      if (phone.length >= 7) {
+        openBtn.href = `https://wa.me/57${num}?text=${encodeURIComponent(preview.value)}`;
+        openBtn.classList.remove('disabled');
+      } else {
+        openBtn.removeAttribute('href');
+        openBtn.classList.add('disabled');
+      }
+    };
+
+    const update = () => {
+      const template = WHATSAPP_TEMPLATES.find(t => t.id === select.value) || WHATSAPP_TEMPLATES[0];
+      preview.value = fillWhatsAppTemplate(template.text, row);
+      updateLink();
+      if (statusEl) statusEl.textContent = '';
+    };
+
+    select.addEventListener('change', update);
+    preview.addEventListener('input', updateLink);
+    copyBtn?.addEventListener('click', async () => {
+      try {
+        await copyText(preview.value);
+        if (statusEl) statusEl.textContent = 'Mensaje copiado.';
+      } catch (_) {
+        if (statusEl) statusEl.textContent = 'No se pudo copiar automaticamente.';
+      }
+    });
+    update();
+  }
+
+  function fillWhatsAppTemplate(template, row) {
+    const nextDate = getNextContactDate(row);
+    const values = {
+      nombre: getField(row, 'name') || 'familia',
+      asesor: authUser?.displayName || getField(row, 'advisor') || 'Musicala',
+      arte: getField(row, 'art') || 'arte',
+      modalidad: getField(row, 'modality') || 'la modalidad que prefieras',
+      sede: getField(row, ['Sede', 'Ubicacion', 'UbicaciÃ³n']) || 'Musicala',
+      fecha: nextDate ? formatYMD(nextDate) : 'la fecha acordada',
+      hora: getTemplateTimeValue(row)
+    };
+    return String(template || '').replace(/\{\{\s*(\w+)\s*\}\}/g, (_, key) => values[key] || '');
+  }
+
+  function getTemplateTimeValue(row) {
+    const raw = String(getField(row, ['Hora', 'Horario', 'Fecha y hora de contacto', 'Fecha para contactar']) || '');
+    const match = raw.match(/(\d{1,2}):(\d{2})/);
+    return match ? `${match[1].padStart(2, '0')}:${match[2]}` : 'la hora acordada';
+  }
+
+  async function copyText(text) {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const temp = document.createElement('textarea');
+    temp.value = text;
+    temp.setAttribute('readonly', '');
+    temp.style.position = 'fixed';
+    temp.style.opacity = '0';
+    document.body.appendChild(temp);
+    temp.select();
+    document.execCommand('copy');
+    document.body.removeChild(temp);
+  }
+
+  function renderHistoryHTML(isNew) {
+    if (isNew) return '';
+    return `<section class="history-panel field">
+      <div class="label">Historial</div>
+      <div id="historyList" class="value history-list">
+        <div class="history-empty">Cargando historial...</div>
+      </div>
+    </section>`;
+  }
+
+  async function loadModalHistory(row) {
+    const historyList = modalBody.querySelector('#historyList');
+    if (!historyList || !firebaseDb || !currentSheet) return;
+    try {
+      const doc = sheetDoc(currentSheet);
+      const id = row.__rowDocId || rowDocId(row, 0);
+      let snap;
+      try {
+        snap = await doc.collection('rows').doc(id).collection('seguimientos')
+          .orderBy('createdAt', 'desc')
+          .limit(12)
+          .get();
+      } catch (_) {
+        snap = await doc.collection('rows').doc(id).collection('seguimientos').get();
+      }
+      const logs = snap.docs.map(d => d.data() || {}).sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0)).slice(0, 12);
+      historyList.innerHTML = logs.length ? logs.map(renderHistoryItem).join('') : '<div class="history-empty">Sin seguimientos registrados todavia.</div>';
+    } catch (err) {
+      console.warn('No se pudo cargar historial:', err);
+      historyList.innerHTML = `<div class="history-empty">No se pudo cargar historial: ${esc(err?.message || err)}</div>`;
+    }
+  }
+
+  function renderHistoryItem(log) {
+    const when = formatTimestamp(log.createdAt);
+    const advisor = log.advisorEmail || 'Sin asesor';
+    const result = log.resultLabel || log.action || 'Seguimiento';
+    const next = log.nextContactAt ? `Proxima: ${formatTimestamp(log.nextContactAt)}` : '';
+    const notes = log.notes || log.reason || '';
+    return `<article class="history-item">
+      <div class="history-item-head">
+        <strong>${esc(result)}</strong>
+        <span>${esc(when)}</span>
+      </div>
+      <div class="history-meta">${esc([advisor, next].filter(Boolean).join(' - '))}</div>
+      ${notes ? `<p>${esc(notes)}</p>` : ''}
+    </article>`;
+  }
+
+  function formatTimestamp(value) {
+    const parsed = parseFlexibleDate(value);
+    if (!parsed) return '';
+    const d = typeof value === 'number' ? new Date(value) : parsed;
+    return new Intl.DateTimeFormat('es-CO', {
+      day:'2-digit',
+      month:'short',
+      year:'numeric',
+      hour:'2-digit',
+      minute:'2-digit'
+    }).format(d);
   }
 
   // Vincula cambios de ArteX -> repuebla InstrumentoX
@@ -1156,8 +1440,17 @@
     return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999).getTime();
   }
 
+  function scheduleHideProgress(delay) {
+    if (hideProgressTimer) window.clearTimeout(hideProgressTimer);
+    hideProgressTimer = window.setTimeout(() => { hideProgressTimer = null; hideProgress(); }, delay);
+  }
+  function cancelHideProgress() {
+    if (hideProgressTimer) { window.clearTimeout(hideProgressTimer); hideProgressTimer = null; }
+  }
+
   function showProgress(title, text, percent = 0) {
     if (!progressPanel) return;
+    cancelHideProgress();
     progressPanel.classList.remove('hidden');
     if (progressTitle) progressTitle.textContent = title;
     setProgress(percent, text);
@@ -1174,6 +1467,52 @@
     progressPanel?.classList.add('hidden');
   }
 
+  // Barra de carga "animada" para operaciones de una sola llamada (sin eventos de avance,
+  // como un .get() de Firestore). Sube sola hacia un techo mientras esperamos y se
+  // completa con finishFauxProgress() al terminar. Evita que el asesor crea que se colgo.
+  function startFauxProgress(title, text, { start = 8, ceiling = 90, stepMs = 350 } = {}) {
+    stopFauxProgressTimer();
+    showProgress(title, text, start);
+    let current = start;
+    fauxProgressTimer = window.setInterval(() => {
+      // Avanza rapido al principio y mas lento cerca del techo.
+      const remaining = ceiling - current;
+      const step = Math.max(0.5, remaining * 0.12);
+      current = Math.min(ceiling, current + step);
+      setProgress(Math.round(current), null);
+    }, stepMs);
+  }
+  function stopFauxProgressTimer() {
+    if (fauxProgressTimer) {
+      window.clearInterval(fauxProgressTimer);
+      fauxProgressTimer = null;
+    }
+  }
+  function finishFauxProgress(text = 'Listo.', hideAfter = 600) {
+    stopFauxProgressTimer();
+    setProgress(100, text);
+    scheduleHideProgress(hideAfter);
+  }
+
+  // Cede el control al navegador para que no se congele ("La pagina no responde").
+  function yieldToUI() {
+    return new Promise((resolve) => window.setTimeout(resolve, 0));
+  }
+
+  // Recorre una lista grande en lotes, soltando el hilo entre lotes para mantener
+  // la pestana responsiva mientras procesamos miles de registros.
+  async function forEachChunked(items, fn, { chunkSize = 400, onProgress = null } = {}) {
+    const list = items || [];
+    for (let i = 0; i < list.length; i++) {
+      fn(list[i], i);
+      if ((i + 1) % chunkSize === 0) {
+        if (onProgress) onProgress(i + 1, list.length);
+        await yieldToUI();
+      }
+    }
+    if (onProgress) onProgress(list.length, list.length);
+  }
+
   function sheetDoc(sheetName) {
     if (!firebaseDb) return null;
     return firebaseDb.collection('sheetCache').doc(slug(sheetName) || 'hoja');
@@ -1184,10 +1523,35 @@
     return id ? slug(id) : `fila-${index + 1}`;
   }
 
+  function createSyncBatchId(sheetName) {
+    return `${slug(sheetName) || 'hoja'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function stableStringify(value) {
+    if (value == null || typeof value !== 'object') return JSON.stringify(value);
+    if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+
+  function hashRow(row) {
+    const raw = stableStringify(row || {});
+    let hash = 2166136261;
+    for (let i = 0; i < raw.length; i += 1) {
+      hash ^= raw.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
   function attachFirebaseMeta(row, payload, docId) {
     const out = { ...(payload?.data || row || {}) };
     Object.defineProperty(out, '__tracking', {
       value: payload?.tracking || null,
+      enumerable: false,
+      configurable: true
+    });
+    Object.defineProperty(out, '__crm', {
+      value: payload?.crm || null,
       enumerable: false,
       configurable: true
     });
@@ -1208,8 +1572,30 @@
     return row?.__tracking && typeof row.__tracking === 'object' ? row.__tracking : {};
   }
 
+  function getCrm(row) {
+    return row?.__crm && typeof row.__crm === 'object' ? row.__crm : {};
+  }
+
   function cloneTracking(tracking) {
     return tracking && typeof tracking === 'object' ? { ...tracking } : {};
+  }
+
+  async function loadSheetNamesFromFirebase() {
+    if (!firebaseDb) return [];
+    try {
+      const snap = await firebaseDb.collection('sheetCache').get();
+      const names = snap.docs
+        .map(docSnap => {
+          const data = docSnap.data() || {};
+          return String(data.sheetName || docSnap.id || '').trim();
+        })
+        .filter(Boolean);
+      return Array.from(new Set(names)).sort((a, b) => a.localeCompare(b, 'es', { sensitivity:'base' }));
+    } catch (err) {
+      console.warn('No se pudieron cargar hojas desde Firebase:', err);
+      setFirebaseStatus('No se pudieron cargar las hojas guardadas en Firebase.');
+      return [];
+    }
   }
 
   async function loadSheetFromFirebase(sheetName) {
@@ -1220,11 +1606,31 @@
       const metaSnap = await doc.get();
       if (!metaSnap.exists) return null;
 
-      const rowSnap = await doc.collection('rows').get();
+      let rowSnap;
+      try {
+        rowSnap = await doc.collection('rows')
+          .where('active', '==', true)
+          .orderBy('source.rowIndex')
+          .get();
+      } catch (indexedErr) {
+        console.warn('No se pudo leer ordenado desde Firebase, usando lectura compatible:', indexedErr);
+        rowSnap = await doc.collection('rows').get();
+      }
       if (rowSnap.empty) return null;
 
       const meta = metaSnap.data() || {};
-      const rows = rowSnap.docs.map(d => attachFirebaseMeta(null, d.data() || {}, d.id));
+      const rows = rowSnap.docs
+        .map(d => ({ id: d.id, payload: d.data() || {} }))
+        .filter(item => item.payload.active !== false)
+        .sort((a, b) => {
+          const ai = Number(a.payload?.source?.rowIndex);
+          const bi = Number(b.payload?.source?.rowIndex);
+          if (Number.isFinite(ai) && Number.isFinite(bi) && ai !== bi) return ai - bi;
+          if (Number.isFinite(ai)) return -1;
+          if (Number.isFinite(bi)) return 1;
+          return a.id.localeCompare(b.id);
+        })
+        .map(item => attachFirebaseMeta(null, item.payload, item.id));
       const headers = Array.isArray(meta.headers) && meta.headers.length
         ? meta.headers
         : Array.from(rows.reduce((set, row) => {
@@ -1241,38 +1647,135 @@
     }
   }
 
+  async function loadSheetPageFromFirebase(sheetName, pageOffset = 0, pageLimit = 200) {
+    if (!firebaseDb) return null;
+
+    try {
+      const doc = sheetDoc(sheetName);
+      const metaSnap = await doc.get();
+      if (!metaSnap.exists) return null;
+      const meta = metaSnap.data() || {};
+      const readLimit = Math.max(pageLimit, pageOffset + pageLimit);
+
+      let rowSnap;
+      try {
+        rowSnap = await doc.collection('rows')
+          .where('active', '==', true)
+          .orderBy('source.rowIndex')
+          .limit(readLimit)
+          .get();
+      } catch (indexedErr) {
+        console.warn('No se pudo leer pagina ordenada desde Firebase, usando lectura compatible:', indexedErr);
+        rowSnap = await doc.collection('rows').limit(readLimit).get();
+      }
+      if (rowSnap.empty) return null;
+
+      const rows = rowSnap.docs
+        .map(d => ({ id: d.id, payload: d.data() || {} }))
+        .filter(item => item.payload.active !== false)
+        .sort((a, b) => {
+          const ai = Number(a.payload?.source?.rowIndex);
+          const bi = Number(b.payload?.source?.rowIndex);
+          if (Number.isFinite(ai) && Number.isFinite(bi) && ai !== bi) return ai - bi;
+          if (Number.isFinite(ai)) return -1;
+          if (Number.isFinite(bi)) return 1;
+          return a.id.localeCompare(b.id);
+        })
+        .slice(pageOffset, pageOffset + pageLimit)
+        .map(item => attachFirebaseMeta(null, item.payload, item.id));
+
+      const headers = Array.isArray(meta.headers) && meta.headers.length
+        ? meta.headers
+        : Array.from(rows.reduce((set, row) => {
+            Object.keys(row || {}).forEach(k => set.add(k));
+            return set;
+          }, new Set()));
+
+      const totalRows = Number(meta.total || 0) || Math.max(rows.length, pageOffset + rows.length);
+      setFirebaseStatus(`Base lista: ${totalRows.toLocaleString()} registros disponibles.`);
+      return { headers, rows, total: totalRows, ts: meta.updatedAt || Date.now(), source: 'firebase-page' };
+    } catch (err) {
+      console.warn('No se pudo leer la pagina rapida, se usara respaldo:', err);
+      setFirebaseStatus('Cargando informaciÃ³n actualizada...');
+      return null;
+    }
+  }
+
   async function saveSheetToFirebase(sheetName, payload) {
     if (!firebaseDb || !payload?.rows?.length) return;
 
     const doc = sheetDoc(sheetName);
     const batchSize = 400;
     const rows = payload.rows || [];
+    const now = Date.now();
+    const syncBatchId = createSyncBatchId(sheetName);
+    const seenIds = new Set();
 
     await doc.set({
       sheetName,
       headers: payload.headers || [],
       total: rows.length,
-      updatedAt: Date.now(),
+      updatedAt: now,
+      lastSyncBatchId: syncBatchId,
       source: 'sheets'
     }, { merge: true });
 
     for (let start = 0; start < rows.length; start += batchSize) {
       const batch = firebaseDb.batch();
       rows.slice(start, start + batchSize).forEach((row, i) => {
-        const now = Date.now();
-        batch.set(doc.collection('rows').doc(rowDocId(row, start + i)), {
+        const rowIndex = start + i;
+        const rowId = rowDocId(row, rowIndex);
+        seenIds.add(rowId);
+        batch.set(doc.collection('rows').doc(rowId), {
           data: row,
+          crm: normalizeCrm(row),
           source: {
+            sheetName,
             sheetSlug: slug(sheetName),
-            updatedFromSheetAt: now
+            rowIndex,
+            sheetRowNumber: rowIndex + 2,
+            updatedFromSheetAt: now,
+            syncBatchId
           },
-          updatedAt: now
+          active: true,
+          lastSeenAt: now,
+          lastSheetHash: hashRow(row),
+          syncError: null,
+          updatedAt: now,
+          version: window.firebase.firestore.FieldValue.increment(1)
         }, { merge: true });
       });
       await batch.commit();
     }
 
+    await archiveRowsMissingFromSync(doc, syncBatchId, seenIds);
+
     setFirebaseStatus(`Datos actualizados: ${rows.length.toLocaleString()} registros disponibles.`);
+  }
+
+  async function archiveRowsMissingFromSync(doc, syncBatchId, seenIds) {
+    const snap = await doc.collection('rows').get();
+    const stale = snap.docs.filter((rowDoc) => {
+      const data = rowDoc.data() || {};
+      if (seenIds.has(rowDoc.id)) return false;
+      if (data.active === false) return false;
+      if (data.pendingSheetSync === true) return false;
+      return data?.source?.syncBatchId !== syncBatchId;
+    });
+
+    const batchSize = 400;
+    for (let start = 0; start < stale.length; start += batchSize) {
+      const batch = firebaseDb.batch();
+      stale.slice(start, start + batchSize).forEach((rowDoc) => {
+        batch.set(rowDoc.ref, {
+          active: false,
+          archivedBySync: true,
+          archivedAt: Date.now(),
+          updatedAt: Date.now()
+        }, { merge: true });
+      });
+      await batch.commit();
+    }
   }
 
   async function saveRowToFirebase(sheetName, row, pendingSheetSync = false) {
@@ -1280,18 +1783,28 @@
     const doc = sheetDoc(sheetName);
     const id = rowDocId(row, 0);
     if (!id) throw new Error('El registro no tiene ID.');
+    const now = Date.now();
 
     await doc.collection('rows').doc(id).set({
       data: row,
-      updatedAt: Date.now(),
+      crm: normalizeCrm(row),
+      source: {
+        ...(row.__source || {}),
+        sheetName,
+        sheetSlug: slug(sheetName)
+      },
+      active: true,
+      updatedAt: now,
       pendingSheetSync,
       pendingReason: pendingSheetSync ? 'edit' : '',
-      syncedAt: pendingSheetSync ? null : Date.now()
+      syncedAt: pendingSheetSync ? null : now,
+      syncError: null,
+      version: window.firebase.firestore.FieldValue.increment(1)
     }, { merge: true });
 
     await doc.set({
       sheetName,
-      updatedAt: Date.now()
+      updatedAt: now
     }, { merge: true });
   }
 
@@ -1336,22 +1849,102 @@
     if (showMessages) status(`Guardando ${snap.size.toLocaleString()} cambio(s) en la base principal...`);
 
     let done = 0;
+    let failed = 0;
     for (const rowDoc of snap.docs) {
       const payload = rowDoc.data() || {};
       const row = payload.data || {};
       setProgress(Math.round((done / snap.size) * 100), `Guardando cambios en la base principal (${done + 1} de ${snap.size})...`);
-      await updateRowInSheets(currentSheet, row);
-      await rowDoc.ref.set({
-        pendingSheetSync: false,
-        pendingReason: '',
-        syncedAt: Date.now()
-      }, { merge: true });
+      try {
+        await updateRowInSheets(currentSheet, row);
+        await rowDoc.ref.set({
+          pendingSheetSync: false,
+          pendingReason: '',
+          syncedAt: Date.now(),
+          crm: normalizeCrm(row),
+          syncError: null,
+          lastSheetHash: hashRow(row),
+          version: window.firebase.firestore.FieldValue.increment(1)
+        }, { merge: true });
+      } catch (err) {
+        failed += 1;
+        await rowDoc.ref.set({
+          pendingSheetSync: true,
+          syncError: String(err?.message || err),
+          updatedAt: Date.now()
+        }, { merge: true });
+        console.warn('No se pudo guardar fila pendiente en Sheets:', err);
+      }
       done += 1;
     }
 
     allRowsCache.delete(currentSheet);
-    if (showMessages) status(`${done.toLocaleString()} cambio(s) guardados en la base principal.`);
-    return done;
+    if (showMessages) {
+      const ok = done - failed;
+      status(failed ? `${ok.toLocaleString()} cambio(s) guardados; ${failed.toLocaleString()} quedaron con error.` : `${ok.toLocaleString()} cambio(s) guardados en la base principal.`);
+    }
+    return done - failed;
+  }
+
+  function scheduleFollowUpRefresh(delay = 2500) {
+    if (!alertsEl && !todayViewEl) return;
+    const token = ++followUpRefreshToken;
+    if (followUpRefreshTimer) window.clearTimeout(followUpRefreshTimer);
+    followUpRefreshTimer = window.setTimeout(async () => {
+      if (token !== followUpRefreshToken) return;
+      const run = async () => {
+        if (token !== followUpRefreshToken) return;
+        try {
+          await computeAndRenderAlerts();
+        } catch (err) {
+          console.warn('No se pudieron calcular Hoy/alertas:', err);
+        }
+      };
+      if ('requestIdleCallback' in window) window.requestIdleCallback(run, { timeout: 5000 });
+      else run();
+    }, delay);
+  }
+
+  function scheduleDailySyncIfNeeded() {
+    if (dailySyncScheduled) return;
+    dailySyncScheduled = true;
+    window.setTimeout(async () => {
+      try {
+        await runDailySyncIfNeeded();
+      } catch (err) {
+        console.warn('No se pudo completar la sincronizacion diaria en segundo plano:', err);
+      }
+    }, 8000);
+  }
+
+  function renderFollowUpPlaceholder() {
+    if (todayViewEl) {
+      todayViewEl.classList.remove('hidden');
+      todayViewEl.classList.add('today-collapsed');
+      todayViewEl.innerHTML = `
+        <div class="today-head">
+          <div>
+            <span class="alert-eyebrow">Hoy</span>
+            <h2>Hoy en Musicala</h2>
+            <p>Cargando la base primero. Hoy y el seguimiento guiado se preparan automaticamente en segundo plano.</p>
+          </div>
+          <div class="today-head-actions">
+            <button id="btnLoadTodayView" class="btn today-toggle" type="button">Preparando...</button>
+          </div>
+        </div>
+      `;
+      todayViewEl.querySelector('#btnLoadTodayView')?.addEventListener('click', async () => {
+        const btn = todayViewEl.querySelector('#btnLoadTodayView');
+        if (btn) {
+          btn.disabled = true;
+          btn.textContent = 'Cargando...';
+        }
+        await computeAndRenderAlerts();
+      });
+    }
+    if (alertsEl) {
+      alertsEl.classList.add('hidden');
+      alertsEl.innerHTML = '';
+    }
   }
 
   async function runDailySyncIfNeeded() {
@@ -1402,8 +1995,9 @@
     const fresh = await fetchAllRowsFromSheets(currentSheet, true);
     const firebaseFresh = await loadSheetFromFirebase(currentSheet);
     allRowsCache.set(currentSheet, firebaseFresh || { ...fresh, source: 'firebase' });
-    if (showMessages) setProgress(85, 'Recalculando avisos de seguimiento...');
-    await computeAndRenderAlerts();
+    if (showMessages) setProgress(85, 'Preparando vista rapida...');
+    renderFollowUpPlaceholder();
+    scheduleFollowUpRefresh(250);
     if (showMessages) {
       setProgress(100, 'Datos actualizados correctamente.');
       status(`Datos actualizados para "${currentSheet}".`);
@@ -1427,12 +2021,16 @@
     return r.json();
   }
 
-  function esc(s) {
+  function escapeHtml(s) {
     return String(s ?? '').replace(/[&<>\"']/g, (c) =>
       ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])
     );
   }
-  function escAttr(s){ return String(s ?? '').replace(/"/g,'&quot;'); }
+  function escapeAttr(s) {
+    return escapeHtml(s);
+  }
+  function esc(s) { return escapeHtml(s); }
+  function escAttr(s){ return escapeAttr(s); }
 
   function pretty(v) {
     if (v == null || v === '') return '';
@@ -1563,6 +2161,12 @@
      Sorting helpers
      ============================= */
   function compareByKey(a, b, key) {
+    if (key === '__crmStage') {
+      return String(normalizeCrm(a).stageLabel).localeCompare(String(normalizeCrm(b).stageLabel), 'es', { sensitivity: 'base' });
+    }
+    if (key === '__crmTemperature') {
+      return Number(normalizeCrm(a).leadScore || 0) - Number(normalizeCrm(b).leadScore || 0);
+    }
     const A = normalizeForSort(a?.[key]);
     const B = normalizeForSort(b?.[key]);
 
@@ -1782,26 +2386,27 @@
 
     const rowRef = doc.collection('rows').doc(id);
     const previousTracking = cloneTracking(getTracking(row));
+    const updatedRow = buildManagedRow(row, action, extra);
     const tracking = buildTrackingUpdate(row, action, extra);
-    const updatedRow = attachFirebaseMeta(row, {
-      data: { ...row },
-      tracking,
-      source: {
-        ...(row.__source || {}),
-        sheetSlug: slug(sheetName)
-      }
-    }, id);
-    const now = Date.now();
 
     await rowRef.set({
-      data: { ...row },
+      data: { ...updatedRow },
       tracking,
+      crm: normalizeCrm(updatedRow),
       source: {
         ...(row.__source || {}),
+        sheetName,
         sheetSlug: slug(sheetName)
       },
-      updatedAt: now
+      active: true,
+      pendingSheetSync: true,
+      pendingReason: `tracking:${tracking.lastAction || action}`,
+      syncError: null,
+      updatedAt: Date.now(),
+      version: window.firebase.firestore.FieldValue.increment(1)
     }, { merge: true });
+
+    const now = Date.now();
 
     await rowRef.collection('seguimientos').add({
       action: tracking.lastAction || action,
@@ -1810,7 +2415,7 @@
       createdAt: now,
       previousTracking,
       newTracking: tracking,
-      contactSnapshot: buildContactSnapshot(row),
+      contactSnapshot: buildContactSnapshot(updatedRow),
       notes: extra.notes || null,
       reason: extra.reason || null,
       nextContactAt: tracking.nextContactAt || null
@@ -1822,7 +2427,7 @@
       action: tracking.lastAction || action,
       resultLabel: tracking.resultLabel || action,
       label: `Gestion: ${tracking.resultLabel || action}`,
-      contactSnapshot: buildContactSnapshot(row),
+      contactSnapshot: buildContactSnapshot(updatedRow),
       nextContactAt: tracking.nextContactAt || null,
       reason: extra.reason || null
     });
@@ -2069,8 +2674,15 @@
     return null;
   }
 
+  function fieldNames(fieldOrNames) {
+    if (Array.isArray(fieldOrNames)) return fieldOrNames;
+    const key = String(fieldOrNames || '').trim();
+    return FIELD_ALIASES[key] || (key ? [key] : []);
+  }
+
   function getField(row, possibleNames){
     if (!row) return '';
+    possibleNames = fieldNames(possibleNames);
     const direct = possibleNames.find(name => Object.prototype.hasOwnProperty.call(row, name));
     if (direct) return row[direct];
 
@@ -2083,6 +2695,143 @@
       if (found) return row[found];
     }
     return '';
+  }
+
+  function setField(row, fieldOrNames, value){
+    if (!row) return '';
+    const names = fieldNames(fieldOrNames);
+    let key = findExistingKey(row, names);
+    if (!key) key = names[0] || '';
+    if (key) row[key] = value;
+    return key;
+  }
+
+  function hasField(row, fieldOrNames){
+    if (!row) return false;
+    return Boolean(findExistingKey(row, fieldNames(fieldOrNames)));
+  }
+
+  function normalizeCrm(row) {
+    const existing = getCrm(row);
+    const stage = existing.stage || inferCrmStage(row);
+    const leadScore = Number.isFinite(Number(existing.leadScore)) ? Number(existing.leadScore) : calculateLeadScore(row, stage);
+    const temperature = existing.temperature || scoreToTemperature(leadScore);
+    const tracking = getTracking(row);
+    const nextContact = parseFlexibleDate(tracking.nextContactAt) || getNextContactDate(row);
+    const lastActionAt = parseFlexibleDate(tracking.lastManagedAt || tracking.updatedAt);
+    const crm = {
+      stage,
+      temperature,
+      leadScore,
+      nextActionType: existing.nextActionType || inferNextActionType(row, stage, nextContact),
+      nextContactAt: existing.nextContactAt ?? (nextContact ? nextContact.getTime() : null),
+      assignedAdvisorEmail: existing.assignedAdvisorEmail || null,
+      lastAdvisorEmail: existing.lastAdvisorEmail || tracking.advisorEmail || null,
+      lastActionAt: existing.lastActionAt ?? (lastActionAt ? lastActionAt.getTime() : null),
+      lastResultLabel: existing.lastResultLabel || tracking.resultLabel || String(getField(row, 'result') || '').trim() || null,
+      attempts: Number(existing.attempts || tracking.attempts || getAttemptCount(row) || 0),
+      isDuplicateCandidate: Boolean(existing.isDuplicateCandidate || false),
+      duplicateGroupId: existing.duplicateGroupId || null,
+      potentialMonthlyValue: Number.isFinite(Number(existing.potentialMonthlyValue)) ? Number(existing.potentialMonthlyValue) : null,
+      probability: Number.isFinite(Number(existing.probability)) ? Number(existing.probability) : null
+    };
+    crm.stageLabel = CRM_STAGES[crm.stage]?.label || crm.stage;
+    crm.temperatureLabel = CRM_TEMPERATURES[crm.temperature]?.label || crm.temperature;
+    return crm;
+  }
+
+  function inferCrmStage(row) {
+    const blob = [
+      getField(row, 'status'),
+      getField(row, 'result'),
+      getField(row, ['Listado', 'Listado1']),
+      getField(row, ['Comentario', 'Observaciones', 'Notas', 'Etapa', 'Gestion', 'GestiÃ³n'])
+    ].map(normalizeText).join(' | ');
+    const tracking = getTracking(row);
+    const status = normalizeText(tracking.status || tracking.lastAction || tracking.resultLabel || '');
+
+    if (/invalid|dato.*invalid|numero invalido|telefono invalido|datos invalidos/.test(`${blob} ${status}`)) return 'invalid';
+    if (/matriculad|inscrit|\bactiv[oa]\b|estudiante activo|ya inicio|enrolled/.test(`${blob} ${status}`) && !/no matriculad|no inscrit|retirad/.test(blob)) return 'enrolled';
+    if (/no interesad|no desea|no quiere|descartad|cerrad|perdid/.test(blob)) return 'not_interested';
+    if (/excluido confirmado|archivad|bloquead|duplicad|retirad/.test(blob)) return 'archived';
+    if (/pendiente.*pago|pago pendiente|payment/.test(blob)) return 'payment_pending';
+    if (/clase.*realiz|trial done/.test(blob)) return 'trial_done';
+    if (/clase.*agend|clase de prueba|trial|agendad/.test(blob)) return 'trial_scheduled';
+    if (/interes|cotiz|precio|horario|pregunt/.test(blob)) return 'interested';
+    if (/contactado|respondio|rescheduled|reprogramado/.test(`${blob} ${status}`)) return 'contacted';
+    if (/reactiv|recover|recovered/.test(`${blob} ${status}`)) return 'reactivation';
+    return 'new';
+  }
+
+  function calculateLeadScore(row, stage = inferCrmStage(row)) {
+    const blob = [
+      getField(row, 'channel'),
+      getField(row, 'art'),
+      getField(row, 'modality'),
+      getField(row, 'plan'),
+      getField(row, 'result'),
+      getField(row, 'status'),
+      getField(row, ['Comentario', 'Observaciones', 'Notas'])
+    ].map(normalizeText).join(' | ');
+    let score = 0;
+    if (stage === 'trial_scheduled') score += 30;
+    if (/referid/.test(blob)) score += 25;
+    if (/horario|agenda|agend/.test(blob)) score += 25;
+    if (/respondio|contactado|whatsapp/.test(blob) || getTracking(row).status === 'contacted') score += 20;
+    if (String(getField(row, 'art') || '').trim()) score += 20;
+    if (/precio|cotiz|valor|interes/.test(blob)) score += 15;
+    if (String(getField(row, 'modality') || '').trim()) score += 15;
+    if (normalizePhone(getField(row, 'phone')).length >= 7 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(getField(row, 'email') || '').trim())) score += 10;
+    const attempts = getAttemptCount(row);
+    if (/no respondio|no respuesta/.test(blob) && attempts >= 2) score -= 10;
+    if (/no respondio|no respuesta/.test(blob) && attempts >= 3) score -= 20;
+    if (stage === 'not_interested') score -= 30;
+    if (stage === 'invalid') score -= 40;
+    if (stage === 'enrolled') score = Math.max(score, 90);
+    return Math.max(0, Math.min(100, score));
+  }
+
+  function scoreToTemperature(score) {
+    const n = Number(score) || 0;
+    if (n >= 80) return 'hot';
+    if (n >= 50) return 'warm';
+    if (n >= 20) return 'cold';
+    return 'frozen';
+  }
+
+  function inferNextActionType(row, stage, nextContact) {
+    if (['enrolled', 'archived', 'not_interested', 'invalid'].includes(stage)) return 'none';
+    if (nextContact) return 'schedule';
+    if (normalizePhone(getField(row, 'phone')).length >= 7) return 'whatsapp';
+    return 'call';
+  }
+
+  function normalizePhone(value) {
+    return String(value || '').replace(/\D/g, '');
+  }
+
+  function renderCrmStageBadge(stage) {
+    const def = CRM_STAGES[stage] || CRM_STAGES.new;
+    return `<span class="crm-badge ${escAttr(def.className)}">${esc(def.label)}</span>`;
+  }
+
+  function renderTemperatureBadge(temperature, score) {
+    const def = CRM_TEMPERATURES[temperature] || CRM_TEMPERATURES.frozen;
+    return `<span class="crm-badge ${escAttr(def.className)}">${esc(def.label)} <small>${Number(score || 0)}</small></span>`;
+  }
+
+  function renderCrmSummaryHTML(row) {
+    const crm = normalizeCrm(row);
+    const next = crm.nextContactAt ? formatYMD(toYMD(new Date(crm.nextContactAt))) : 'Sin fecha';
+    const result = crm.lastResultLabel || 'Sin gestion registrada';
+    return `<div class="crm-summary field">
+      <div class="label">Estado comercial</div>
+      <div class="value">
+        ${renderCrmStageBadge(crm.stage)}
+        ${renderTemperatureBadge(crm.temperature, crm.leadScore)}
+        <span class="crm-meta">Proxima accion: ${esc(crm.nextActionType)} · ${esc(next)} · ${esc(result)}</span>
+      </div>
+    </div>`;
   }
 
   function findHeaderIncludes(row, keywords){
@@ -2130,26 +2879,222 @@
   }
 
   async function computeAndRenderAlerts() {
-    if (!alertsEl) return;
+    if (!alertsEl && !todayViewEl) return;
 
     let cache = allRowsCache.get(currentSheet);
-    if (!cache) {
-      cache = await loadAllRowsForSheet(currentSheet);
-      allRowsCache.set(currentSheet, cache);
+    const needsNetwork = !cache;
+    if (needsNetwork) {
+      startFauxProgress('Cargando "Hoy en Musicala"', 'Leyendo contactos de la base...', { start: 10, ceiling: 88 });
+      status('Preparando "Hoy en Musicala"...');
     }
+    try {
+      if (!cache) {
+        cache = await loadAllRowsForSheet(currentSheet);
+        allRowsCache.set(currentSheet, cache);
+      }
 
-    const result = buildTopRecommendedQueue(cache.rows || []);
-    console.info('[top10 seguimiento]', result.debug);
-    renderAlertsUI(result);
+      const rows = cache.rows || [];
+      // Detenemos la barra "animada": de aqui en adelante el avance es real por lotes.
+      if (needsNetwork) {
+        stopFauxProgressTimer();
+        setProgress(60, `Organizando ${rows.length.toLocaleString()} contactos...`);
+      }
+      // Fase 1: tarjetas de "Hoy" (60% -> 80%)
+      const onTodayProgress = needsNetwork
+        ? (done, tot) => setProgress(60 + Math.round((done / Math.max(1, tot)) * 20), `Analizando contactos (${done.toLocaleString()} de ${tot.toLocaleString()})...`)
+        : null;
+      await renderTodayView(rows, onTodayProgress);
+      // Fase 2: cola recomendada (80% -> 96%)
+      const onQueueProgress = needsNetwork
+        ? (done, tot) => setProgress(80 + Math.round((done / Math.max(1, tot)) * 16), `Priorizando seguimientos (${done.toLocaleString()} de ${tot.toLocaleString()})...`)
+        : null;
+      const result = await buildTopRecommendedQueue(rows, onQueueProgress);
+      console.info('[top10 seguimiento]', result.debug);
+      renderAlertsUI(result);
+      if (needsNetwork) {
+        finishFauxProgress('"Hoy en Musicala" listo.');
+        status(`"Hoy en Musicala" listo: ${rows.length.toLocaleString()} registros analizados.`);
+      }
+    } catch (err) {
+      if (needsNetwork) {
+        stopFauxProgressTimer();
+        hideProgress();
+      }
+      throw err;
+    }
   }
 
-  function buildTopRecommendedQueue(rows) {
+  async function renderTodayView(rows, onProgress = null) {
+    if (!todayViewEl) return;
+    const groups = await buildTodayGroups(rows || [], onProgress);
+    const defs = todayGroupDefs();
+    const totalItems = defs.reduce((sum, def) => sum + groups[def.key].length, 0);
+
+    if (!rows.length) {
+      todayViewEl.classList.add('hidden');
+      todayViewEl.innerHTML = '';
+      return;
+    }
+
+    todayViewEl.classList.toggle('today-collapsed', !todayViewExpanded);
+    todayViewEl.innerHTML = `
+      <div class="today-head">
+        <div>
+          <span class="alert-eyebrow">Hoy</span>
+          <h2>Hoy en Musicala</h2>
+          <p>${todayViewExpanded ? 'Contactos accionables segun fechas, etapa CRM, prioridad y ultimo seguimiento.' : `${totalItems.toLocaleString()} contactos accionables detectados. Abre el panel para ver las tarjetas.`}</p>
+        </div>
+        <div class="today-head-actions">
+          <div class="today-kpis">
+            ${defs.slice(0, 4).map(def => `<span>${esc(def.label)} <strong>${groups[def.key].length.toLocaleString()}</strong></span>`).join('')}
+          </div>
+          <button id="btnToggleTodayView" class="btn today-toggle" type="button" aria-expanded="${todayViewExpanded ? 'true' : 'false'}">
+            ${todayViewExpanded ? 'Minimizar' : 'Ver completo'}
+          </button>
+        </div>
+      </div>
+      ${todayViewExpanded ? `
+        <div class="today-groups">
+          ${defs.map(def => renderTodayGroup(def, groups[def.key])).join('')}
+        </div>
+        ${totalItems ? '' : '<div class="alert-empty">No hay contactos accionables para hoy con las reglas actuales.</div>'}
+      ` : ''}
+    `;
+    todayViewEl.classList.remove('hidden');
+
+    todayViewEl.querySelector('#btnToggleTodayView')?.addEventListener('click', () => {
+      todayViewExpanded = !todayViewExpanded;
+      renderTodayView(rows);
+    });
+
+    todayViewEl.querySelectorAll('[data-openid].today-open').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        const row = await getRowById(btn.getAttribute('data-openid') || '');
+        if (row) openModal(row);
+        else alert('No se encontro la fila seleccionada.');
+      });
+    });
+    todayViewEl.querySelectorAll('[data-action]').forEach(btn => {
+      btn.addEventListener('click', () => handleRecommendedAction(btn));
+    });
+  }
+
+  function todayGroupDefs() {
+    return [
+      { key:'today', label:'Para contactar hoy' },
+      { key:'overdue', label:'Vencidos' },
+      { key:'new', label:'Nuevos sin gestionar' },
+      { key:'highNoDate', label:'Alta prioridad sin fecha' },
+      { key:'reactivation', label:'Reactivaciones' },
+      { key:'trial', label:'Clases de prueba proximas' },
+      { key:'payment', label:'Pendientes de pago' },
+      { key:'invalid', label:'Datos invalidos para auditar' }
+    ];
+  }
+
+  async function buildTodayGroups(rows, onProgress = null) {
+    const today = toYMD(new Date());
+    const limitPerGroup = 6;
+    const groups = {
+      today: [], overdue: [], new: [], highNoDate: [],
+      reactivation: [], trial: [], payment: [], invalid: []
+    };
+    const add = (key, item) => {
+      if (!groups[key] || groups[key].length >= limitPerGroup) return;
+      groups[key].push(item);
+    };
+
+    await forEachChunked(rows, (row, index) => {
+      if (isActiveOrEnrolled(row)) return;
+      const crm = normalizeCrm(row);
+      const next = getNextContactDate(row);
+      const last = getLastManagedDate(row);
+      const priority = normalizeText(getField(row, 'priority'));
+      const rec = classifyRecommendedFollowUp(row, index, today);
+      const item = { row, crm, rec, index };
+
+      if (next && next.getTime() === today.getTime()) add('today', item);
+      if (next && next < today) add('overdue', item);
+      if (!last && crm.stage === 'new') add('new', item);
+      if (!next && priority === 'alta') add('highNoDate', item);
+      if (crm.stage === 'reactivation' || rec.bucket === 'reactivation_never_contacted' || rec.bucket === 'reactivation_old_client_or_warm') add('reactivation', item);
+      if (crm.stage === 'trial_scheduled' || crm.stage === 'trial_done') add('trial', item);
+      if (crm.stage === 'payment_pending') add('payment', item);
+      if (crm.stage === 'invalid' || rec.bucket === 'excluded_audit') add('invalid', item);
+    }, { onProgress });
+
+    Object.keys(groups).forEach((key) => groups[key].sort(compareTodayItems));
+    return groups;
+  }
+
+  function compareTodayItems(a, b) {
+    const an = getNextContactDate(a.row);
+    const bn = getNextContactDate(b.row);
+    if (an && bn && an.getTime() !== bn.getTime()) return an - bn;
+    if (an && !bn) return -1;
+    if (!an && bn) return 1;
+    return Number(b.crm.leadScore || 0) - Number(a.crm.leadScore || 0);
+  }
+
+  function renderTodayGroup(def, items) {
+    return `
+      <section class="today-group">
+        <div class="today-group-head">
+          <h3>${esc(def.label)}</h3>
+          <span>${items.length.toLocaleString()}</span>
+        </div>
+        <div class="today-card-list">
+          ${items.length ? items.map(renderTodayCard).join('') : '<div class="today-empty">Sin contactos</div>'}
+        </div>
+      </section>
+    `;
+  }
+
+  function renderTodayCard(item) {
+    const row = item.row;
+    const crm = item.crm || normalizeCrm(row);
+    const id = String(getField(row, 'id') || '').trim();
+    const name = String(getField(row, 'name') || '').trim() || '(Sin nombre)';
+    const phone = String(getField(row, 'phone') || '').trim();
+    const phoneDigits = normalizePhone(phone);
+    const waNum = phoneDigits.startsWith('57') ? phoneDigits.slice(2) : phoneDigits;
+    const wa = phoneDigits.length >= 7 ? `https://wa.me/57${escAttr(waNum)}` : '';
+    const art = getField(row, 'art') || 'Sin arte';
+    const channel = getField(row, 'channel') || 'Sin canal';
+    const advisor = getField(row, 'advisor') || 'Sin asesor';
+    const next = crm.nextContactAt ? formatYMD(toYMD(new Date(crm.nextContactAt))) : 'Sin fecha';
+    const result = crm.lastResultLabel || 'Sin gestion';
+
+    return `
+      <article class="today-card">
+        <div class="today-card-main">
+          <strong>${esc(name)}</strong>
+          <span>${esc([phone, art, channel].filter(Boolean).join(' - '))}</span>
+          <span>${esc(`Asesor: ${advisor} - Proxima: ${next} - ${result}`)}</span>
+        </div>
+        <div class="today-card-badges">
+          ${renderCrmStageBadge(crm.stage)}
+          ${renderTemperatureBadge(crm.temperature, crm.leadScore)}
+        </div>
+        <div class="today-actions">
+          <button class="btn today-open" data-openid="${escAttr(id)}" type="button">Abrir</button>
+          ${wa ? `<a class="btn btn-whatsapp-mini" href="${wa}" target="_blank" rel="noopener">WhatsApp</a>` : ''}
+          <button class="btn alert-action" data-action="contacted" data-openid="${escAttr(id)}" type="button">Contactado</button>
+          <button class="btn alert-action" data-action="no_response" data-openid="${escAttr(id)}" type="button">No respondio</button>
+          <button class="btn alert-action" data-action="reschedule" data-openid="${escAttr(id)}" type="button">Reprogramar</button>
+          <button class="btn alert-action" data-action="enrolled" data-openid="${escAttr(id)}" type="button">Matriculado</button>
+        </div>
+      </article>
+    `;
+  }
+
+  async function buildTopRecommendedQueue(rows, onProgress = null) {
     const today = toYMD(new Date());
     const groups = createRecommendedGroups();
     const counts = createRecommendedCounts(rows.length);
     let skippedByCooldown = 0;
 
-    rows.forEach((row, index) => {
+    await forEachChunked(rows, (row, index) => {
       const rec = classifyRecommendedFollowUp(row, index, today);
       counts[rec.bucket] = (counts[rec.bucket] || 0) + 1;
       if (rec.skippedByCooldown) {
@@ -2157,7 +3102,7 @@
         return;
       }
       if (groups[rec.bucket]) groups[rec.bucket].push({ row, rec, index });
-    });
+    }, { onProgress });
 
     Object.values(groups).forEach((items) => items.sort(compareRecommendedItems));
 
@@ -2560,7 +3505,8 @@
       extra.reason = reason;
     }
 
-    const actionButtons = Array.from(alertsEl?.querySelectorAll('.alert-action') || []);
+    const actionScope = btn.closest('#todayView, #alerts') || document;
+    const actionButtons = Array.from(actionScope.querySelectorAll('.alert-action') || []);
     const originalText = btn.textContent;
     actionButtons.forEach(actionBtn => { actionBtn.disabled = true; });
     btn.textContent = 'Guardando...';
@@ -2569,7 +3515,7 @@
       const updated = await saveTrackingToFirebase(currentSheet, row, action, extra);
       upsertRowInLocalState(updated);
       renderCurrentPage();
-      await computeAndRenderAlerts();
+      scheduleFollowUpRefresh(150);
       status('Seguimiento guardado.');
     } catch (err) {
       console.error(err);
@@ -2581,15 +3527,10 @@
   }
 
   function buildManagedRow(row, action, extra = {}){
-    return attachFirebaseMeta(row, {
-      data: { ...row },
-      tracking: buildTrackingUpdate(row, action, extra),
-      source: row.__source || null
-    }, row.__rowDocId);
     const out = { ...row };
     const now = currentDateTimeLocal();
     const today = toYMD(new Date());
-    const set = (names, value) => setExistingField(out, names, value);
+    const set = (fieldOrNames, value) => setField(out, fieldOrNames, value);
     const attempts = getAttemptCount(row) + 1;
 
     set(['Fecha ultima gestion', 'Fecha Ãºltima gestiÃ³n', 'Ultima gestion', 'Ãšltima gestiÃ³n'], now);
@@ -2626,7 +3567,12 @@
       set(['Resultado gestion', 'Resultado gestiÃ³n', 'Resultado'], `Saltado: ${extra.reason || 'Sin motivo'}`);
     }
 
-    return out;
+    return attachFirebaseMeta(out, {
+      data: out,
+      tracking: buildTrackingUpdate(row, action, extra),
+      crm: normalizeCrm(out),
+      source: row.__source || null
+    }, row.__rowDocId);
   }
 
   function buildTrackingUpdate(row, action, extra = {}){
@@ -2672,10 +3618,12 @@
 
   function buildContactSnapshot(row) {
     return {
-      nombre: getField(row, ['Nombre']) || null,
-      telefono: getField(row, ['Telefono', 'Celular', 'Celular/Telefono']) || null,
-      canal: getField(row, ['Canal', 'Canal de comunicacion']) || null,
-      asesor: getField(row, ['Asesor', 'Responsable']) || null
+      nombre: getField(row, 'name') || null,
+      telefono: getField(row, 'phone') || null,
+      correo: getField(row, 'email') || null,
+      canal: getField(row, 'channel') || null,
+      asesor: getField(row, 'advisor') || null,
+      arte: getField(row, 'art') || null
     };
   }
 

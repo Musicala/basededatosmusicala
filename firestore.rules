@@ -33,6 +33,7 @@ service cloud.firestore {
         'total',
         'updatedAt',
         'source',
+        'lastSyncBatchId',
         'dailySyncDate',
         'dailySyncStartedAt',
         'dailySyncFinishedAt'
@@ -42,6 +43,7 @@ service cloud.firestore {
       && (!('total' in request.resource.data) || request.resource.data.total is int)
       && (!('updatedAt' in request.resource.data) || request.resource.data.updatedAt is number)
       && (!('source' in request.resource.data) || request.resource.data.source == 'sheets')
+      && (!('lastSyncBatchId' in request.resource.data) || request.resource.data.lastSyncBatchId is string)
       && (!('dailySyncDate' in request.resource.data) || request.resource.data.dailySyncDate is string)
       && (!('dailySyncStartedAt' in request.resource.data) || request.resource.data.dailySyncStartedAt is number)
       && (!('dailySyncFinishedAt' in request.resource.data) || request.resource.data.dailySyncFinishedAt is number);
@@ -50,20 +52,36 @@ service cloud.firestore {
     function validSheetCacheRow() {
       return request.resource.data.keys().hasOnly([
         'data',
+        'crm',
         'tracking',
         'source',
         'updatedAt',
         'pendingSheetSync',
         'pendingReason',
-        'syncedAt'
+        'syncedAt',
+        'active',
+        'lastSeenAt',
+        'lastSheetHash',
+        'syncError',
+        'version',
+        'archivedBySync',
+        'archivedAt'
       ])
       && request.resource.data.data is map
       && request.resource.data.updatedAt is number
+      && (!('crm' in request.resource.data) || request.resource.data.crm is map)
       && (!('tracking' in request.resource.data) || request.resource.data.tracking is map)
       && (!('source' in request.resource.data) || request.resource.data.source is map)
       && (!('pendingSheetSync' in request.resource.data) || request.resource.data.pendingSheetSync is bool)
       && (!('pendingReason' in request.resource.data) || request.resource.data.pendingReason is string)
-      && (!('syncedAt' in request.resource.data) || request.resource.data.syncedAt == null || request.resource.data.syncedAt is number);
+      && (!('syncedAt' in request.resource.data) || request.resource.data.syncedAt == null || request.resource.data.syncedAt is number)
+      && (!('active' in request.resource.data) || request.resource.data.active is bool)
+      && (!('lastSeenAt' in request.resource.data) || request.resource.data.lastSeenAt is number)
+      && (!('lastSheetHash' in request.resource.data) || request.resource.data.lastSheetHash is string)
+      && (!('syncError' in request.resource.data) || request.resource.data.syncError == null || request.resource.data.syncError is string)
+      && (!('version' in request.resource.data) || request.resource.data.version is number)
+      && (!('archivedBySync' in request.resource.data) || request.resource.data.archivedBySync is bool)
+      && (!('archivedAt' in request.resource.data) || request.resource.data.archivedAt is number);
     }
 
     function validSeguimientoLog() {
