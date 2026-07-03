@@ -1,0 +1,21 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "rows",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "active", "order": "ASCENDING" },
+        { "fieldPath": "source.rowIndex", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "rows",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "pendingSheetSync", "order": "ASCENDING" },
+        { "fieldPath": "updatedAt", "order": "ASCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}

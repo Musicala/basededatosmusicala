@@ -52,7 +52,7 @@
   // ------- Config -------
   if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
   const API_BASE = window.API_BASE;
-  const APP_VERSION = '1.3.0';
+  const APP_VERSION = '1.4.0';
   const appVersionEl = document.getElementById('appVersion');
   if (appVersionEl) appVersionEl.textContent = `v${APP_VERSION}`;
   const ALLOWED_EMAILS = [
@@ -366,9 +366,16 @@
       status('La base esta tardando mas de lo normal. Revisa tu conexion a internet; si persiste, recarga la pagina (Ctrl+Shift+R).');
       if (withProgress) setProgress(86, 'Esperando respuesta de la base...');
     }, 15000);
+    // La hoja completa se descarga UNA sola vez y queda en cache en memoria
+    // (y en el cache local del navegador). Paginar, buscar y "Hoy" reutilizan
+    // esa misma copia: Anterior/Siguiente ya no consultan la red.
     let cached;
     try {
-      cached = await loadSheetPageFromFirebase(currentSheet, offset, limit);
+      cached = await loadAllRowsForSheet(currentSheet);
+      if (!cached?.rows?.length) {
+        // Respaldo: lectura paginada directa (comportamiento anterior).
+        cached = await loadSheetPageFromFirebase(currentSheet, offset, limit);
+      }
     } catch (err) {
       window.clearTimeout(watchdog);
       if (withProgress) { stopFauxProgressTimer(); hideProgress(); }
@@ -377,10 +384,13 @@
     }
     window.clearTimeout(watchdog);
     if (withProgress) finishFauxProgress('Base lista.');
-    if (cached) {
-      currentHeaders = cached.headers;
-      total = cached.total;
-      currentRows = cached.rows || [];
+    if (cached?.rows?.length) {
+      currentHeaders = cached.headers || [];
+      total = Number(cached.total || cached.rows.length);
+      if (offset >= total) offset = Math.max(0, Math.floor(Math.max(0, total - 1) / limit) * limit);
+      currentRows = cached.source === 'firebase-page'
+        ? (cached.rows || [])
+        : (cached.rows || []).slice(offset, offset + limit);
       keyColumnInUse = pickKeyColumn(currentHeaders);
       renderTable(currentHeaders, currentRows);
 
@@ -411,32 +421,6 @@
     setFirebaseStatus('Modo Firebase-first: Sheets solo se consulta con Actualizar datos.');
     renderFollowUpPlaceholder();
     scheduleFollowUpRefresh(250);
-    return;
-
-    currentHeaders = res.headers;
-    currentRows    = res.rows || [];
-    total          = parseInt(res.total || 0, 10);
-
-    keyColumnInUse = pickKeyColumn(currentHeaders);
-    if (!keyColumnInUse) {
-      status('⚠️ Esta hoja no tiene columna "ID". Verás datos, pero no podrás guardar cambios.');
-    } else {
-      status(`Listo. Clave: “${keyColumnInUse}”. Mostrando ${currentRows.length.toLocaleString()} de ${total.toLocaleString()} registros.`);
-    }
-
-    // ✅ Render y seteo de displayedRows dentro de renderTable (incluye ordenamiento)
-    renderTable(currentHeaders, currentRows);
-
-    const page  = Math.floor(offset / limit) + 1;
-    const pages = Math.max(1, Math.ceil(total / limit));
-    if (pageInfo) {
-      pageInfo.textContent = `Página ${page.toLocaleString()} de ${pages.toLocaleString()} — ${total.toLocaleString()} registros`;
-    }
-    if (btnPrev) btnPrev.disabled = offset <= 0;
-    if (btnNext) btnNext.disabled = offset + limit >= total;
-
-    // 🔔 Calcular y pintar alertas
-    renderFollowUpPlaceholder();
   }
 
   function renderTable(headers, rows) {
@@ -746,20 +730,10 @@
             label: 'Creo registro',
             contactSnapshot: buildContactSnapshot(formValues)
           });
-          allRowsCache.delete(currentSheet);
-          await loadPage();
-          closeModal();
-          return;
-
-          saveStatus.textContent = 'Creado ✓';
-          await logAdvisorActivity('create_record', {
-            sheetName: currentSheet,
-            rowId: String(formValues.ID || ''),
-            label: 'Creo registro',
-            contactSnapshot: buildContactSnapshot(formValues)
-          });
-          allRowsCache.delete(currentSheet);
-          await loadPage();
+          // Actualizamos la copia local en vez de re-descargar toda la base.
+          upsertRowInLocalState(formValues);
+          await loadPage(false, false);
+          scheduleFollowUpRefresh(300);
           closeModal();
           return;
         }
@@ -780,7 +754,8 @@
           return;
         }
 
-        await saveRowToFirebase(currentSheet, { ...originalRow, ...formValues }, true);
+        const mergedRow = { ...originalRow, ...formValues };
+        await saveRowToFirebase(currentSheet, mergedRow, true);
         await logAdvisorActivity('edit_record', {
           sheetName: currentSheet,
           rowId: key,
@@ -790,8 +765,16 @@
           contactSnapshot: buildContactSnapshot(formValues)
         });
         saveStatus.textContent = 'Guardado ✓ Pendiente de enviar a principal';
-        allRowsCache.delete(currentSheet);
-        await loadPage();
+        // Actualizamos la copia local (conservando tracking/CRM) en vez de
+        // borrar el cache y re-descargar toda la base.
+        upsertRowInLocalState(attachFirebaseMeta(mergedRow, {
+          data: mergedRow,
+          tracking: getTracking(row),
+          crm: getCrm(row),
+          source: row.__source || null
+        }, row.__rowDocId));
+        await loadPage(false, false);
+        scheduleFollowUpRefresh(300);
         closeModal();
 
       } catch (err) {
@@ -1130,8 +1113,19 @@
     try {
       const app = window.firebase.apps?.length ? window.firebase.app() : window.firebase.initializeApp(cfg);
       wireFirebaseAuth();
+      const db = window.firebase.firestore(app);
+      // Cache local (IndexedDB): al recargar la pagina los datos se leen del equipo
+      // y Firestore solo trae lo que cambio. Si el navegador no lo soporta o hay
+      // varias pestanas antiguas abiertas, seguimos con red normal sin romper nada.
+      try {
+        db.enablePersistence({ synchronizeTabs: true }).catch((err) => {
+          console.warn('Cache local no disponible, se usa red normal:', err?.code || err);
+        });
+      } catch (err) {
+        console.warn('Cache local no disponible, se usa red normal:', err);
+      }
       setFirebaseStatus('Ingresa con Google para ver la base de datos.');
-      return window.firebase.firestore(app);
+      return db;
     } catch (err) {
       console.error(err);
       setFirebaseStatus('No se pudo iniciar el acceso seguro.');
