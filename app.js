@@ -49,10 +49,19 @@
   const btnRefreshStats = document.getElementById('btnRefreshStats');
   const btnCloseStats = document.getElementById('btnCloseStats');
 
+  // Conciliación con Lista de estudiantes (proyecto Firebase separado)
+  const btnReconcile = document.getElementById('btnReconcile');
+  const reconcilePanel = document.getElementById('reconcilePanel');
+  const reconcileSummary = document.getElementById('reconcileSummary');
+  const reconcileContent = document.getElementById('reconcileContent');
+  const btnRunReconcile = document.getElementById('btnRunReconcile');
+  const btnSaveReconcile = document.getElementById('btnSaveReconcile');
+  const btnCloseReconcile = document.getElementById('btnCloseReconcile');
+
   // ------- Config -------
-  if (!window.API_BASE) throw new Error('No se encontró window.API_BASE. Define la URL /exec en index.html');
-  const API_BASE = window.API_BASE;
-  const APP_VERSION = '1.4.0';
+  // Sheets (Apps Script) es SOLO respaldo opcional: la app funciona 100% con Firebase.
+  const API_BASE = window.API_BASE || '';
+  const APP_VERSION = '1.5.0';
   const appVersionEl = document.getElementById('appVersion');
   if (appVersionEl) appVersionEl.textContent = `v${APP_VERSION}`;
   const ALLOWED_EMAILS = [
@@ -166,6 +175,8 @@
 
   // ===== Búsqueda GLOBAL =====
   const allRowsCache = new Map(); // sheet -> { headers, rows, total, ts }
+  const searchBlobCache = new WeakMap(); // fila -> texto normalizado para buscar
+  const MAX_RENDER_ROWS = 1000; // tope de filas pintadas de una vez (evita congelar la pestaña)
   const allRowsLoadPromises = new Map(); // sheet -> Promise<{ headers, rows, total, ts }>
   let searchActive   = false;
 
@@ -338,6 +349,34 @@
       btnSyncSheets.disabled = false;
     }
   });
+  btnReconcile?.addEventListener('click', () => {
+    reconcilePanel?.classList.remove('hidden');
+    reconcilePanel?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  btnCloseReconcile?.addEventListener('click', () => reconcilePanel?.classList.add('hidden'));
+  btnRunReconcile?.addEventListener('click', async () => {
+    try {
+      btnRunReconcile.disabled = true;
+      await runReconciliation();
+    } catch (err) {
+      console.error(err);
+      if (reconcileSummary) reconcileSummary.textContent = `No se pudo conciliar: ${err?.message || err}`;
+    } finally {
+      btnRunReconcile.disabled = false;
+    }
+  });
+  btnSaveReconcile?.addEventListener('click', async () => {
+    try {
+      btnSaveReconcile.disabled = true;
+      await saveReconciliationToFirebase();
+    } catch (err) {
+      console.error(err);
+      if (reconcileSummary) reconcileSummary.textContent = `No se pudo guardar la conciliación: ${err?.message || err}`;
+    } finally {
+      btnSaveReconcile.disabled = false;
+    }
+  });
+
   // Delegación: click en el "Nombre" abre modal de edición
   table.addEventListener('click', (e) => {
     const btn = e.target.closest('.name-link');
@@ -425,7 +464,7 @@
 
   function renderTable(headers, rows) {
     const nameIdx = headers.findIndex((h) => h.trim().toLowerCase() === 'nombre');
-    const visibleHeaders = ['__crmStage', '__crmTemperature', ...headers];
+    const visibleHeaders = ['__crmStage', '__crmTemperature', '__enrollment', ...headers];
 
     // Si hay una columna activa, ordena una copia
     let toRender = rows;
@@ -441,6 +480,10 @@
         .map(x => x.r);
     }
 
+    // Tope de render: pintar miles de filas de golpe congela la pestaña.
+    const truncated = toRender.length > MAX_RENDER_ROWS;
+    if (truncated) toRender = toRender.slice(0, MAX_RENDER_ROWS);
+
     // ✅ LO MÁS IMPORTANTE: lo que se ve = displayedRows
     displayedRows = toRender;
 
@@ -448,7 +491,7 @@
       visibleHeaders.map((h) => {
         const isActive = sortState.key === h;
         const dirAttr  = isActive ? ` data-dir="${sortState.dir}"` : '';
-        const label = h === '__crmStage' ? 'Etapa CRM' : h === '__crmTemperature' ? 'Temperatura' : h;
+        const label = h === '__crmStage' ? 'Etapa CRM' : h === '__crmTemperature' ? 'Temperatura' : h === '__enrollment' ? 'Inscrito' : h;
         return `<th class="th-sortable" data-key="${escAttr(h)}"${dirAttr}>
                   <span>${esc(label)}</span>
                   <span class="th-sort-ind"></span>
@@ -462,6 +505,7 @@
         const tds = visibleHeaders.map((h) => {
           if (h === '__crmStage') return `<td>${renderCrmStageBadge(crm.stage)}</td>`;
           if (h === '__crmTemperature') return `<td>${renderTemperatureBadge(crm.temperature, crm.leadScore)}</td>`;
+          if (h === '__enrollment') return `<td>${renderEnrollmentBadge(r.__enrollment)}</td>`;
           const colIdx = headers.indexOf(h);
           const val = r[h];
           if (colIdx === nameIdx) {
@@ -472,7 +516,7 @@
         }).join('');
         return `<tr>${tds}</tr>`;
       }).join('')
-    }</tbody>`;
+    }${truncated ? `<tr><td colspan="${visibleHeaders.length}" class="locked-cell">Mostrando las primeras ${MAX_RENDER_ROWS.toLocaleString()} filas. Usa la búsqueda para afinar el resultado.</td></tr>` : ''}</tbody>`;
 
     table.innerHTML = thead + tbody;
 
@@ -518,6 +562,7 @@
   }
 
   async function fetchAllRowsFromSheets(sheetName, mirrorToFirebase = false) {
+    if (!API_BASE) throw new Error('El respaldo de Google Sheets no está configurado (window.API_BASE).');
     const first = await fetchJSON(`${API_BASE}?mode=data&sheet=${encodeURIComponent(sheetName)}&limit=1&offset=0&_ts=${Date.now()}`);
     const headers = first.headers || [];
 
@@ -586,8 +631,14 @@
       const rows = cache.rows || [];
       const headers = cache.headers || currentHeaders;
 
+      // El texto normalizado de cada fila se calcula UNA sola vez y se reutiliza
+      // en cada tecleo: así la búsqueda no congela la página con bases grandes.
       const filtered = rows.filter(r => {
-        const blob = norm(headers.map(h => r[h]).join(' | '));
+        let blob = searchBlobCache.get(r);
+        if (blob === undefined) {
+          blob = norm(headers.map(h => r[h]).join(' | '));
+          searchBlobCache.set(r, blob);
+        }
         return terms.every(t => blob.includes(t));
       });
 
@@ -1559,6 +1610,12 @@
       enumerable: false,
       configurable: true
     });
+    Object.defineProperty(out, '__enrollment', {
+      value: payload?.enrollment || null,
+      enumerable: false,
+      configurable: true,
+      writable: true
+    });
     return out;
   }
 
@@ -1803,6 +1860,7 @@
   }
 
   async function updateRowInSheets(sheetName, row) {
+    if (!API_BASE) throw new Error('El respaldo de Google Sheets no está configurado (window.API_BASE).');
     const keyCol = keyColumnInUse || pickKeyColumn(Object.keys(row || {}));
     const key = String(row?.[keyCol] ?? '').trim();
     if (!keyCol || !key) throw new Error('No se encontro ID para actualizar la base principal.');
@@ -1997,6 +2055,216 @@
       status(`Datos actualizados para "${currentSheet}".`);
       window.setTimeout(hideProgress, 900);
     }
+  }
+
+  /* =============================
+     6.5) Conciliación con Lista de estudiantes
+     (proyecto Firebase separado: estudiantes-musicala, SOLO lectura)
+     ============================= */
+  let listaAppInstance = null;
+  let lastReconcileMatches = null;
+
+  function getListaApp() {
+    const cfg = window.LISTA_FIREBASE_CONFIG || {};
+    if (!cfg.apiKey || !cfg.projectId || !window.firebase?.initializeApp) {
+      throw new Error('Falta la configuración de Lista de estudiantes (window.LISTA_FIREBASE_CONFIG).');
+    }
+    if (!listaAppInstance) {
+      listaAppInstance = (window.firebase.apps || []).find((a) => a.name === 'lista')
+        || window.firebase.initializeApp(cfg, 'lista');
+    }
+    return listaAppInstance;
+  }
+
+  async function ensureListaAuth(app) {
+    const auth = app.auth();
+    if (auth.currentUser) return auth.currentUser;
+    const provider = new window.firebase.auth.GoogleAuthProvider();
+    const hint = window.firebase.auth().currentUser?.email;
+    if (hint) provider.setCustomParameters({ login_hint: hint });
+    const cred = await auth.signInWithPopup(provider);
+    return cred.user;
+  }
+
+  function digitsKey(v) {
+    const d = String(v ?? '').replace(/\D+/g, '');
+    return d.length > 10 ? d.slice(-10) : d;
+  }
+
+  function nameMatchKey(v) {
+    return String(v ?? '')
+      .toLowerCase()
+      .normalize('NFD').replace(/\p{Diacritic}/gu, '')
+      .replace(/[^a-z0-9\s]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function emailMatchKey(v) {
+    return String(v ?? '').trim().toLowerCase();
+  }
+
+  function rowValueByAliases(row, aliases) {
+    for (const alias of aliases) {
+      const val = row?.[alias];
+      if (val != null && String(val).trim() !== '') return val;
+    }
+    // Búsqueda flexible por si el encabezado tiene tildes/codificación distinta
+    const wanted = aliases.map((a) => nameMatchKey(a));
+    for (const key of Object.keys(row || {})) {
+      if (wanted.includes(nameMatchKey(key))) {
+        const val = row[key];
+        if (val != null && String(val).trim() !== '') return val;
+      }
+    }
+    return '';
+  }
+
+  async function loadEstudiantesFromLista() {
+    const app = getListaApp();
+    await ensureListaAuth(app);
+    const db = window.firebase.firestore(app);
+    const snap = await db.collection('estudiantes').get();
+    return snap.docs.map((d) => ({ id: d.id, ...(d.data() || {}) }));
+  }
+
+  function buildStudentIndexes(students) {
+    const byPhone = new Map();
+    const byEmail = new Map();
+    const byName = new Map();
+    const add = (map, key, student) => { if (key && !map.has(key)) map.set(key, student); };
+    students.forEach((s) => {
+      [s.mobile, s.guardianMobile, s.phone, s.guardianPhone].forEach((v) => {
+        const key = digitsKey(v);
+        if (key.length >= 7) add(byPhone, key, s);
+      });
+      add(byEmail, emailMatchKey(s.studentEmail), s);
+      add(byName, nameMatchKey(s.studentName), s);
+    });
+    return { byPhone, byEmail, byName };
+  }
+
+  function matchRowToStudent(row, indexes) {
+    const phone = digitsKey(rowValueByAliases(row, FIELD_ALIASES.phone));
+    if (phone.length >= 7 && indexes.byPhone.has(phone)) {
+      return { student: indexes.byPhone.get(phone), matchedBy: 'celular' };
+    }
+    const email = emailMatchKey(rowValueByAliases(row, FIELD_ALIASES.email));
+    if (email && indexes.byEmail.has(email)) {
+      return { student: indexes.byEmail.get(email), matchedBy: 'correo' };
+    }
+    const name = nameMatchKey(rowValueByAliases(row, FIELD_ALIASES.name));
+    if (name && name.split(' ').length >= 2 && indexes.byName.has(name)) {
+      return { student: indexes.byName.get(name), matchedBy: 'nombre' };
+    }
+    return null;
+  }
+
+  async function runReconciliation() {
+    if (reconcileSummary) reconcileSummary.textContent = 'Leyendo Lista de estudiantes...';
+    if (reconcileContent) reconcileContent.innerHTML = '';
+    btnSaveReconcile?.classList.add('hidden');
+
+    const [students, cache] = await Promise.all([
+      loadEstudiantesFromLista(),
+      loadAllRowsForSheet(currentSheet)
+    ]);
+    const rows = cache?.rows || [];
+    if (!students.length) {
+      if (reconcileSummary) reconcileSummary.textContent = 'La Lista de estudiantes no devolvió registros.';
+      return;
+    }
+
+    const indexes = buildStudentIndexes(students);
+    const matches = [];
+    rows.forEach((row) => {
+      const hit = matchRowToStudent(row, indexes);
+      if (hit) matches.push({ row, docId: row.__rowDocId, student: hit.student, matchedBy: hit.matchedBy });
+    });
+    lastReconcileMatches = matches;
+
+    const statusCount = {};
+    matches.forEach((m) => {
+      const st = String(m.student.status || 'Sin estado').trim() || 'Sin estado';
+      statusCount[st] = (statusCount[st] || 0) + 1;
+    });
+
+    if (reconcileSummary) {
+      reconcileSummary.textContent =
+        `${students.length.toLocaleString()} estudiantes en la Lista · ` +
+        `${matches.length.toLocaleString()} coincidencias en "${currentSheet}" · ` +
+        Object.entries(statusCount).map(([k, v]) => `${k}: ${v.toLocaleString()}`).join(' · ');
+    }
+
+    if (reconcileContent) {
+      if (!matches.length) {
+        reconcileContent.innerHTML = '<p>No se encontraron coincidencias por celular, correo o nombre en esta hoja.</p>';
+      } else {
+        const rowsHtml = matches.map((m) => `
+          <tr>
+            <td>${esc(rowValueByAliases(m.row, FIELD_ALIASES.name) || '(sin nombre)')}</td>
+            <td>${esc(m.student.studentName || '')}</td>
+            <td>${renderEnrollmentBadge({ status: m.student.status })}</td>
+            <td>${esc(m.matchedBy)}</td>
+          </tr>`).join('');
+        reconcileContent.innerHTML = `
+          <div class="table-wrap">
+            <table class="data-table">
+              <thead><tr><th>En base comercial</th><th>En Lista de estudiantes</th><th>Estado</th><th>Coincidencia por</th></tr></thead>
+              <tbody>${rowsHtml}</tbody>
+            </table>
+          </div>`;
+      }
+    }
+    if (matches.length) btnSaveReconcile?.classList.remove('hidden');
+  }
+
+  async function saveReconciliationToFirebase() {
+    if (!firebaseDb) throw new Error('Sin conexión con la base.');
+    const matches = lastReconcileMatches || [];
+    if (!matches.length) throw new Error('Primero ejecuta la conciliación.');
+
+    const doc = sheetDoc(currentSheet);
+    const now = Date.now();
+    const batchSize = 400;
+    for (let start = 0; start < matches.length; start += batchSize) {
+      const batch = firebaseDb.batch();
+      matches.slice(start, start + batchSize).forEach((m) => {
+        if (!m.docId) return;
+        batch.set(doc.collection('rows').doc(m.docId), {
+          enrollment: {
+            status: String(m.student.status || ''),
+            studentId: String(m.student.id || ''),
+            studentName: String(m.student.studentName || ''),
+            matchedBy: m.matchedBy,
+            checkedAt: now
+          },
+          updatedAt: now
+        }, { merge: true });
+      });
+      await batch.commit();
+    }
+
+    // Reflejar en la vista sin re-descargar la base
+    matches.forEach((m) => {
+      try { m.row.__enrollment = { status: m.student.status || '', matchedBy: m.matchedBy, checkedAt: now }; } catch (_) {}
+    });
+    renderTable(currentHeaders, currentRows);
+    if (reconcileSummary) {
+      reconcileSummary.textContent = `Conciliación guardada: ${matches.length.toLocaleString()} registros marcados con su estado de inscripción.`;
+    }
+    await logAdvisorActivity('reconcile_lista', {
+      sheetName: currentSheet,
+      label: 'Concilió con Lista de estudiantes',
+      count: matches.length
+    }).catch(() => {});
+  }
+
+  function renderEnrollmentBadge(enrollment) {
+    if (!enrollment || (!enrollment.status && !enrollment.matchedBy)) return '';
+    const st = String(enrollment.status || 'Inscrito').trim() || 'Inscrito';
+    const cls = /activo/i.test(st) ? 'badge music' : /inactivo|retirado/i.test(st) ? 'badge theatre' : 'badge arts';
+    return `<span class="${cls}" title="Según Lista de estudiantes">${esc(st)}</span>`;
   }
 
   /* =============================

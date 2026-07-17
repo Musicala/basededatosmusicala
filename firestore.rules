@@ -65,7 +65,8 @@ service cloud.firestore {
         'syncError',
         'version',
         'archivedBySync',
-        'archivedAt'
+        'archivedAt',
+        'enrollment'
       ])
       && request.resource.data.data is map
       && request.resource.data.updatedAt is number
@@ -81,7 +82,8 @@ service cloud.firestore {
       && (!('syncError' in request.resource.data) || request.resource.data.syncError == null || request.resource.data.syncError is string)
       && (!('version' in request.resource.data) || request.resource.data.version is number)
       && (!('archivedBySync' in request.resource.data) || request.resource.data.archivedBySync is bool)
-      && (!('archivedAt' in request.resource.data) || request.resource.data.archivedAt is number);
+      && (!('archivedAt' in request.resource.data) || request.resource.data.archivedAt is number)
+      && (!('enrollment' in request.resource.data) || request.resource.data.enrollment is map);
     }
 
     function validSeguimientoLog() {

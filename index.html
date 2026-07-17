@@ -40,8 +40,9 @@
       <!-- botón crear registro -->
       <button id="btnNew" class="btn" type="button" title="Crear nuevo cliente">+ Nuevo</button>
       <button id="btnAdvisorStats" class="btn hidden" type="button" title="Ver estadisticas por asesor">Estadisticas</button>
-      <button id="btnSyncFirebase" class="btn" type="button" title="Actualizar la base de datos">Actualizar datos</button>
-      <button id="btnSyncSheets" class="btn" type="button" title="Guardar cambios en la base principal">Guardar en principal</button>
+      <button id="btnReconcile" class="btn" type="button" title="Comparar con Lista de estudiantes inscritos">Conciliar inscritos</button>
+      <button id="btnSyncFirebase" class="btn" type="button" title="Respaldo: traer datos desde Google Sheets">Respaldo: traer de Sheets</button>
+      <button id="btnSyncSheets" class="btn" type="button" title="Respaldo: enviar cambios a Google Sheets">Respaldo: enviar a Sheets</button>
     </div>
   </header>
 
@@ -52,7 +53,7 @@
         <span id="firebaseStatus">Ingresa con tu cuenta autorizada para ver la base de datos.</span>
       </div>
       <div class="sync-actions">
-        <small>Usa Actualizar datos para traer la información más reciente.</small>
+        <small>La base trabaja directo sobre Firebase. Los botones de Sheets son solo respaldo.</small>
         <button id="btnGoogleLogin" class="btn" type="button">Ingresar con Google</button>
       </div>
     </section>
@@ -75,6 +76,22 @@
     <section id="todayView" class="today-view hidden" aria-label="Hoy en Musicala"></section>
 
     <section id="alerts" class="alerts hidden" aria-label="Avisos de seguimiento"></section>
+
+    <section id="reconcilePanel" class="advisor-stats hidden" aria-label="Conciliación con Lista de estudiantes">
+      <div class="advisor-stats-head">
+        <div>
+          <span class="alert-eyebrow">Conciliación</span>
+          <h2>Inscritos según Lista de estudiantes</h2>
+          <p id="reconcileSummary">Compara la base comercial con los estudiantes inscritos y su estado.</p>
+        </div>
+        <div class="advisor-stats-controls">
+          <button id="btnRunReconcile" class="btn" type="button">Conciliar ahora</button>
+          <button id="btnSaveReconcile" class="btn hidden" type="button">Guardar resultado en la base</button>
+          <button id="btnCloseReconcile" class="btn" type="button">Cerrar</button>
+        </div>
+      </div>
+      <div id="reconcileContent" class="advisor-stats-content"></div>
+    </section>
 
     <section id="advisorStatsPanel" class="advisor-stats hidden" aria-label="Estadisticas por asesor">
       <div class="advisor-stats-head">
@@ -158,6 +175,15 @@
       storageBucket: 'db-musicala.firebasestorage.app',
       messagingSenderId: '511593925043',
       appId: '1:511593925043:web:326e4fb5afa5a8c0a563c6'
+    };
+    // Proyecto separado: Lista de estudiantes inscritos (solo lectura para conciliar)
+    window.LISTA_FIREBASE_CONFIG = {
+      apiKey: 'AIzaSyA12_rlUjYM2z4aFG4bf43Wf0tSNTxC0Vg',
+      authDomain: 'estudiantes-musicala.firebaseapp.com',
+      projectId: 'estudiantes-musicala',
+      storageBucket: 'estudiantes-musicala.firebasestorage.app',
+      messagingSenderId: '342934326940',
+      appId: '1:342934326940:web:a75cc4634569c5a4a82759'
     };
   </script>
 
