@@ -61,7 +61,7 @@
   // ------- Config -------
   // Sheets (Apps Script) es SOLO respaldo opcional: la app funciona 100% con Firebase.
   const API_BASE = window.API_BASE || '';
-  const APP_VERSION = '1.5.0';
+  const APP_VERSION = '1.5.1';
   const appVersionEl = document.getElementById('appVersion');
   if (appVersionEl) appVersionEl.textContent = `v${APP_VERSION}`;
   const ALLOWED_EMAILS = [
