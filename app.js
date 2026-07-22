@@ -68,11 +68,13 @@
     'alekcaballeromusic@gmail.com',
     'catalina.medina.leal@gmail.com',
     'musicalaasesor@gmail.com',
-    'imusicala@gmail.com'
+    'imusicala@gmail.com',
+    'adminmusicala@gmail.com'
   ];
   const ADMIN_EMAILS = [
     'alekcaballeromusic@gmail.com',
-    'catalina.medina.leal@gmail.com'
+    'catalina.medina.leal@gmail.com',
+    'adminmusicala@gmail.com'
   ];
   const firebaseDb = initFirebaseCache();
   const authReady = waitForFirebaseAuth();
